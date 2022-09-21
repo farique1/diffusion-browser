@@ -653,7 +653,7 @@ def main():
     frame_top_l.grid_columnconfigure(1, weight=1)
 
     # Top right sub frame for buttons
-    frame_top_r = tk.Frame(frame_top, height=BUTT_HEIGHT, width=250, bg=BG_COLOR)
+    frame_top_r = tk.Frame(frame_top, height=BUTT_HEIGHT, width=INFO_IMG_SZ, bg=BG_COLOR)
     frame_top_r.grid(row=0, column=1, sticky='ewns')
     frame_top_r.grid_propagate(False)
 
@@ -721,7 +721,7 @@ def main():
     text_info.insert('insert', 'Diffusion Browser v1.0\n'
                                'github.com/farique1/diffusion-browser\n'
                                '(c) Fred Rique 2022\n\n'
-                               'For Stable Diffusion ds-webui\n'
+                               'For Stable Diffusion sd-webui\n'
                                'github.com/sd-webui')
     text_info.place(x=0, y=INFO_IMG_SZ, height=text_info_height, width=INFO_IMG_SZ)
     text_info['state'] = 'disable'
