@@ -43,6 +43,7 @@ FONT = [FONT_NAME, FONT_SIZE, FONT_WEIGHT]
 # There are missing tags, add more as needed.
 TEXT_TAGS = ['embedded info',
              'prompt',
+             'negative prompt',
              'seed',
              'sampler',
              'sampler_name',
@@ -153,6 +154,7 @@ def _on_click(image_path, button):
     image_folder = os.path.dirname(current_image)
 
     original_image = Image.open(image_path)
+    image_format = original_image.format
     real_size = original_image.size[0], original_image.size[1]
     image_data = resize_Image(original_image, (INFO_IMG_SZ, INFO_IMG_SZ))
     image_data = ImageTk.PhotoImage(image_data)
@@ -162,16 +164,35 @@ def _on_click(image_path, button):
     # Read embedded information
     source = ''
     try:
-        embed = original_image.text
+        if image_format == 'PNG':
+            embed = original_image.text
+        elif image_format == 'JPEG':
+            img_exif = original_image._getexif()
+            data = list(img_exif.items())[1][1]
+            if not isinstance(data, int):
+                embed = [chr(d) for d in data if d > 0]
+                embed = ''.join(embed)
+                embed = embed[7:]
+                if embed.startswith('Upscale'):
+                    embed = {'extras': embed}
+                else:
+                    embed = {'parameters': embed}
+            else:
+                embed = False
         if embed:
             embed_key = list(embed.keys())[0]
             # If image is from automatic1111
             if embed_key == 'parameters':
                 source = 'automatic1111'
                 parameters = embed[embed_key]
-                prompt = parameters.split('\n')[0]
-                embed_par = [('prompt', prompt)]
-                parameters = parameters[len(prompt):].strip()
+                sections = parameters.split('\n')
+                embed_par = [('prompt', sections[0])]
+                if sections[1].startswith('Negative prompt'):
+                    negative_prompt = sections[1].split(':')[1]
+                    embed_par.append(('negative prompt', negative_prompt))
+                    parameters = sections[2]
+                else:
+                    parameters = sections[1]
                 parameters = parameters.split(',')
                 for par in parameters:
                     tag = par.split(':')[0].strip().lower()
@@ -195,12 +216,14 @@ def _on_click(image_path, button):
                     if not embed_par:
                         embed_par = [('embedded info', 'not found')]
                 except json.decoder.JSONDecodeError:
-                    embed_par = [('embedded info', 'unknown format')]
+                    embed_par = [('embedded info', 'unknown type')]
         else:
             embed = ''
             embed_par = [('embedded info', 'not found')]
     except AttributeError:
         embed_par = [('embedded info', 'not found')]
+    except IndexError:
+        embed_par = [('embedded info', 'unknown format')]
 
     # Additional information
     img_format = os.path.basename(current_image)
