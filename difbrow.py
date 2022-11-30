@@ -60,6 +60,7 @@ TEXT_TAGS = ['embedded info',
              'strength',
              'denoising strength',
              'denoising_strength',
+             'first pass size',
              'mask blur',
              'n_iter',
              'iterations',
@@ -188,7 +189,7 @@ def _on_click(image_path, button):
                 sections = parameters.split('\n')
                 embed_par = [('prompt', sections[0])]
                 if sections[1].startswith('Negative prompt'):
-                    negative_prompt = sections[1].split(':')[1]
+                    negative_prompt = sections[1][17:]
                     embed_par.append(('negative prompt', negative_prompt))
                     parameters = sections[2]
                 else:
