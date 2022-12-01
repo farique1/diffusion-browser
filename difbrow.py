@@ -81,6 +81,7 @@ TEXT_TAGS = ['embedded info',
              'upscale_strength',
              'target',
              'model hash',
+             'clip skip',
              ' ',
              'source',
              'real_size',
@@ -771,7 +772,7 @@ def fill_grid(image_save):
     restart.destroy()
 
 
-def grid_keys(event, button, i, j):
+def grid_keys(event, button, i, j, image_rows):
     '''Navigate the grid using the arrow keys'''
     if j >= COL_NBR:
         j = 0
@@ -779,7 +780,7 @@ def grid_keys(event, button, i, j):
     if j <= -1:
         j = COL_NBR - 1
         i -= 1
-    if i >= ROW_NBR:
+    if i >= image_rows:
         i = 0
     try:
         button[i][j].invoke()
@@ -950,6 +951,7 @@ def main():
     blank = Image.new(mode="RGB", size=(GRID_IMG_SZ, GRID_IMG_SZ))
     blank = ImageTk.PhotoImage(blank)
 
+    # Create grid buttons
     c = 0
     image_save = []
     for i in range(0, rows):
@@ -962,11 +964,11 @@ def main():
             buttons[i][j] = tk.Button(frame_buttons, image=blank, relief='flat',
                                       highlightthickness=0, borderwidth=0, activebackground=ACC_COLOR1)
             buttons[i][j]['command'] = lambda arg=image_path[i][j], btn=buttons[i][j]: _on_click(arg, btn)
+            buttons[i][j].bind('<Left>', lambda event, btn=buttons, i=i, j=j - 1: grid_keys(event, btn, i, j, image_rows))
+            buttons[i][j].bind('<Right>', lambda event, btn=buttons, i=i, j=j + 1: grid_keys(event, btn, i, j, image_rows))
+            buttons[i][j].bind('<Up>', lambda event, btn=buttons, i=i - 1, j=j: grid_keys(event, btn, i, j, image_rows))
+            buttons[i][j].bind('<Down>', lambda event, btn=buttons, i=i + 1, j=j: grid_keys(event, btn, i, j, image_rows))
             buttons[i][j].grid(row=i, column=j)
-            buttons[i][j].bind('<Left>', lambda event, btn=buttons, i=i, j=j - 1: grid_keys(event, btn, i, j))
-            buttons[i][j].bind('<Right>', lambda event, btn=buttons, i=i, j=j + 1: grid_keys(event, btn, i, j))
-            buttons[i][j].bind('<Up>', lambda event, btn=buttons, i=i - 1, j=j: grid_keys(event, btn, i, j))
-            buttons[i][j].bind('<Down>', lambda event, btn=buttons, i=i + 1, j=j: grid_keys(event, btn, i, j))
 
             image_save.append((buttons[i][j], image_path[i][j]))
 
