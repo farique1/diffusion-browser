@@ -1,0 +1,47 @@
+embedded info
+prompt
+negative prompt
+seed
+sampler
+sampler_name
+steps
+ddim_steps
+ddim_eta
+cfg scale
+cfg_scale
+cfgscale
+width
+height
+size
+initimg
+strength
+denoising strength
+denoising_strength
+first pass size
+mask blur
+n_iter
+iterations
+batch_size
+batch size
+batch pos
+grid
+batch
+fit
+progress_images
+toggles
+upscale
+model
+visibility
+resize_mode
+gfpgan_strength
+upscale_level
+upscale_strength
+target
+model hash
+clip skip
+ 
+source
+real_size
+format
+created
+path
