@@ -116,6 +116,7 @@ Clicking the image name on the context menu will copy its path.
 **Control+i**: Overlays the selected parameter on the grid images.  
 **Control+shift+i**: Clears the overlayed parameters.  
 **Control+r**: Refresh new/deleted images in the current path.  
+**PageUp/PageDown**: Scroll the image grid by one page.  
 **Esc**: Cancel the progress when loading images. The images loaded so far are kept. The loading can be resumed with the refresh button.  
   
 ## Full sized image view.  
