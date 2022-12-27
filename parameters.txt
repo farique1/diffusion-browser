@@ -29,16 +29,20 @@ batch
 fit
 progress_images
 toggles
-upscale
-model
-visibility
 resize_mode
 gfpgan_strength
 upscale_level
 upscale_strength
 target
+model
 model hash
 clip skip
+model 1
+upscale 1
+visibility 1
+model 2
+upscale 2
+visibility 2
  
 source
 real_size
