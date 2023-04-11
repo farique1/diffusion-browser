@@ -1002,52 +1002,71 @@ def read_image_info(original_image, image_path):
                 else:
                     embed = {'parameters': embed}
 
+    metadata_error = []
     if embed:
-        if isinstance(embed, int) or isinstance(embed, str):
-            embed = {}
+        try:
+            if isinstance(embed, int) or isinstance(embed, str):
+                embed = {}
 
-        if 'parameters' in embed.keys():
-            source = 'automatic1111'
-            parameters = embed['parameters']
-            prompt = parameters.partition('Steps: ')[0]
-            negative_prompt = prompt.partition('Negative prompt: ')[2]
-            parameters = 'Steps: ' + parameters.partition('Steps: ')[2]
+            if 'parameters' in embed.keys():
+                source = 'automatic1111'
+                parameters = embed['parameters']
+                prompt = parameters.partition('Steps: ')[0]
+                negative_prompt = prompt.partition('Negative prompt: ')[2]
+                parameters = 'Steps: ' + parameters.partition('Steps: ')[2]
 
-            if negative_prompt:
-                prompt = prompt.partition('Negative prompt: ')[0]
-                embed_par['prompt'] = prompt.strip().replace('\n', ', ')
-                embed_par['negative prompt'] = negative_prompt.strip().replace('\n', ', ')
-            else:
-                embed_par['prompt'] = prompt.strip()
+                if negative_prompt:
+                    prompt = prompt.partition('Negative prompt: ')[0]
+                    embed_par['prompt'] = prompt.strip().replace('\n', ', ')
+                    embed_par['negative prompt'] = negative_prompt.strip().replace('\n', ', ')
+                else:
+                    embed_par['prompt'] = prompt.strip()
 
-            parameters = parameters.split(',')
+                parameters = parameters.split(',')
 
-            for par in parameters:
-                par_list = par.split(':')
-                title = par_list[0].strip().lower()
-                content = par_list[1].strip().lower()
-                embed_par[title] = content
-
-        elif 'extras' in embed.keys():
-            source = 'automatic1111 extras'
-            modules = embed['extras'].split('\n')
-            embed_par = {}
-            for c, module in enumerate(modules):
-                parameters = module.split(',')
                 for par in parameters:
-                    if par:
-                        par_list = par.split(':')
-                        title = f'{par_list[0].strip().lower()} {str(c + 1)}'
-                        content = par_list[1].strip().lower()
-                        embed_par[title] = content
-        else:
-            try:
-                source = list(embed.keys())[0]
-                embed_par = json.loads(embed[source])
-            except (json.decoder.JSONDecodeError, IndexError):
-                embed_par['embedded info'] = embed_raw
+                    par_list = par.split(':')
+                    title = par_list[0].strip().lower()
+                    content = par_list[1].strip().lower()
+                    embed_par[title] = content
+
+            elif 'extras' in embed.keys():
+                source = 'automatic1111 extras'
+                modules = embed['extras'].split('\n')
+                embed_par = {}
+                for c, module in enumerate(modules):
+                    parameters = module.split(',')
+                    for par in parameters:
+                        if par:
+                            par_list = par.split(':')
+                            title = f'{par_list[0].strip().lower()} {str(c + 1)}'
+                            content = par_list[1].strip().lower()
+                            embed_par[title] = content
+            else:
+                try:
+                    source = list(embed.keys())[0]
+                    embed_par = json.loads(embed[source])
+                except (json.decoder.JSONDecodeError, IndexError):
+                    embed_par['embedded info'] = embed_raw
+        # Sorry for that but these metadata are a mess, never know what may come out of them.
+        except:
+            embed_par['embedded info'] = embed_raw
+            metadata_error.append(image_path)
     else:
         embed_par['embedded info'] = 'no information'
+
+    if metadata_error:
+        metadata_error_copy = '\n'.join(metadata_error)
+        tense = ['']
+        if len(metadata_error) > 1:
+            tense = ['s']
+
+        copy_to_clipboard(None, metadata_error_copy)
+
+        message = (f'Failed to parse {len(metadata_error)} image{tense[0]} metadata.\n\n'
+                   f'{metadata_error_copy}\n\n'
+                   f'Path{tense[0]} copied to the clipboard.')
+        res = tk.messagebox.showinfo(title='Metadata error.', message=message, parent=root)
 
     # Additional information
     real_size = original_image.size[0], original_image.size[1]
@@ -1179,8 +1198,6 @@ def generate_image_list(search_string, parameter_string, invert=False, master=Fa
             progress.update()
 
         lbl_files.config(text=f'{c} images')
-
-    # print(time.time() - start)
 
     lbl_files.config(text=f'{c} images')
 
