@@ -43,7 +43,33 @@ visibility 1
 model 2
 upscale 2
 visibility 2
- 
+version
+fooocus v2 expansion
+styles
+performance
+resolution
+sharpness
+guidance scale
+adm guidance
+base model
+refiner model
+refiner switch
+scheduler
+lora 1
+weight 1
+lora 2
+weight 2
+lora 3
+weight 3
+lora 4
+weight 4
+lora 5
+weight 5
+lora weight 1
+lora name 1
+lora weight 2
+lora name 2
+
 source
 real_size
 format
