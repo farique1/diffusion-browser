@@ -1,7 +1,7 @@
 [Desktop Entry]
 Comment[en_US]=
 Comment=
-Exec=python $HOME/Diffusion-Browser/difbrow.py
+Exec=python $HOME/Diffusion-Browser/difbrow.pyw
 GenericName[en_US]=
 GenericName=
 MimeType=
@@ -11,7 +11,7 @@ NoDisplay=false
 Path=~/Diffusion-Browser/
 StartupNotify=true
 Terminal=true
-TerminalOptions=python difbrow.py
+TerminalOptions=python difbrow.pyw
 Type=Application
 X-DBUS-ServiceName=
 X-DBUS-StartupType=
