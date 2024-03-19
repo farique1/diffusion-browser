@@ -31,6 +31,8 @@ Find images and select format by their content not their extensions
 Undock and dock the image and inforormation viewers  
 Make the metadata reading functions more independent to facilitate future implementations  
 More  
+
+[**Changes**](#Changes).  
   
 > On [Embedders](Embedders/README.md) there are scripts to embed information from some generators that do not embed them.  
    Four versions of **Fooocus** embedders and probably outdated versions of **invoke-ai** and **sd-webui**.  
