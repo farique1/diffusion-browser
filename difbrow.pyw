@@ -1,9 +1,13 @@
-# Diffuse Browser v3.0 (beta).
+# Diffuse Browser v3.1
 # Fred Rique (c) 2022 - 2024.
 # github.com/farique1/diffusion-browser
 # An easy way to view embedded image metadata of most AI generators.
 
 # CHANGES
+# v3.0
+#   Load image information and save for further use
+#   Read image file on demand, threaded
+#   Multiple paths
 #   ALT+... > Search or expose exact
 #   CONTROL+ALT+... > Search or expose exact inverted
 #   HOME > Go to the top of the grid
@@ -13,23 +17,71 @@
 #   CONTROL+UP > Go to the first image
 #   CONTROL+DOWN > Go to the last image
 #   Searching using PATH as a parameter will normalize the path
+# v3.1
+#   Paths requester
+#      Toggle active or inactive folders
+#      Double clicking on subfolders or active on the paths requester will toggle them
+#      Double clicking on the path name will change it
+#      RETURN, SPACE on the paths requester will toggle subfolders
+#      SHIFT+RETURN, SHIFT+SPACE on the paths requester will toggle active
+#      Button to change the selected path
+#   Image grid
+#      Right click an image now selects it
+#      SHIFT+UP became ALT+UP
+#      SHIFT+DOWN became ALT+DOWN
+#      Multi select images
+#         SHIFT+UP add select up
+#         SHIFT+DOWN add select down
+#         SHIFT+LEFT add select left
+#         SHIFT+RIGHT add select right
+#         shift+click select more
+#         control+click select toggle
+#         Menu title copy all selected
+#         Menu item perform on all images
+#         Keyboard shortcuts affects all selected images
+#   Removed seed from the internal image viewer header
+#   Optimizations
+#      Load images one by one instead of by rows
+#      Functions to consolidate selected and unselected button state
+#   Several small tweaks on the GUI
+#       Added Scrollbar to the information window
+#      Themed the scrollbars
+#      Exchanged open path and paths buttons positions
+#      Moved refresh and open path buttons
+#      Menu appearance
+#      Some state color changes
+#   Added save batch to folder menu item
+#      SHIFT+CTRL+S activate batch copy
+#   Paths combobox show all paths containing images
+#   Metadata errors bunched together for display.
+#   Change readme: ctr+l=overlay, ctrl+i=save info
+#   Metadata reading more robust
+#   Added support for Fooocus and Fooocus a1111 native embedded metadata
 
-# FIX / ADD
+# FIX
 #   Sometimes when searching for a word and after it sorting and overlaying,
 #      the overlaying stops working on all shown images. (thesis: maybe it is
 #      only overlaying the images that are "visible" on the grid if the grid
 #      did not had been reduced by the search. Images that are farthest from
 #      the first searched image than the height of the grid in images)
-#   Searching for path will not set the path combobox to all folders
+
+# ADD
 #   Use im.get_format_mimetype() or Image.MIME[img.format] or img.format
 #      to determine the image type. Also to load images regardless of extension
 #   Undock and dock the image and embedded info viewers (see teste.py)
-#   Add active status to the folders
-#   Scrollbar on the information view window
 #   Multiple projects
+#   Images Heart
+#   Images Starts
+#   Images Tags
+#   Images Sets
+#   Mute folders to prevent them from appearing without changing the database
+#   Rebuild the order of the parameters without needing to rebuild the database
+#   Keep metadata reading functions independent, delivering a standard format
+#   Allow consolidation of multiple parameters into a single label
 
-import bz2
+import re
 import os
+import bz2
 import glob
 import json
 import math
@@ -45,7 +97,6 @@ import configparser
 import tkinter as tk
 from operator import itemgetter
 from collections import OrderedDict
-
 from tkinter.colorchooser import askcolor
 from tkinter import ttk, font, filedialog
 from PIL import Image, ImageTk, ImageOps, UnidentifiedImageError
@@ -82,11 +133,11 @@ TEXT_INFO_DEFAULT = ('Diffusion Browser v3.0\n'
 
 LOCAL_PATH = os.path.split(os.path.abspath(__file__))[0]
 PROJECT_PATH = 'Projects'
-default_project = 'default'
-INI_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, default_project, 'difbrowser.ini')
-PARAMETERS_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, default_project, 'parameters.txt')
-DATA_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, default_project, 'data.pickle')
-FOLDERS_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, default_project, 'folders.json')
+current_project = 'default'
+INI_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'difbrowser.ini')
+PARAMETERS_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'parameters.txt')
+DATA_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'data.pickle')
+FOLDERS_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'folders.json')
 
 OS = platform.system()
 
@@ -104,8 +155,10 @@ is_overlay = ''
 current_index = 0
 current_seed = ''
 current_image = ''
+multi_index = []
 sort_reverse = True
 time_format = '%Y-%m-%d %H:%M:%S'
+prev_button = None
 
 # .ini file handling
 ini_path = os.path.join(LOCAL_PATH, INI_FILE)
@@ -158,59 +211,72 @@ def resize_image(image, maxsize):
     ratio = max(r1, r2)
     newsize = (int(image.size[0] / ratio), int(image.size[1] / ratio))
     image = image.resize(newsize, Image.Resampling.LANCZOS)
+
     return image
 
 
-def render_buttons(visible_buttons):
-    # print(f'Started - {threading.current_thread()}')
-    for button_data in visible_buttons:
+def get_canvas_boundaries():
+    try:
+        canvas_height = canvas.winfo_height()
+        y_srt = canvas.yview()[0]
+        y_end = canvas.yview()[1]
+        y_len = y_end - y_srt
+        total_height = canvas_height / y_len
+        canvas_y_top = int(total_height * y_srt / (GRID_IMG_SZ + BORDER * 2))
+        canvas_y_bot = int(total_height * y_end / (GRID_IMG_SZ + BORDER * 2)) + 1
 
-        button = button_data['button']
-        if not button:
-            return
+        slice_start = canvas_y_top * COL_NBR
+        slice_end = canvas_y_bot * COL_NBR + COL_NBR
+        slice_end = min(slice_end, len(image_list))
 
-        image = Image.open(button_data['file'])
+        return slice_start, slice_end
+
+    except tk.TclError:
+        raise SystemExit(0)
+
+
+def render_buttons(image_data, n):
+
+    slice_start, slice_end = get_canvas_boundaries()
+    if n < slice_start or n > slice_end:
+        image_data['has_image'] = False
+        return
+
+    image_data['button'].update()
+
+    try:
+        image = Image.open(image_data['file'])
         image = resize_image(image, (GRID_IMG_SZ, GRID_IMG_SZ))
         overlay = ''
 
         if is_overlay:
             image = image.convert("L")
             image = ImageOps.colorize(image, black=BG_COLOR, white=FONT_COLOR)
-            embed_dict = button_data['dic_info']
+            embed_dict = image_data['dic_info']
             overlay = embed_dict.get(is_overlay, '')
 
         image = ImageTk.PhotoImage(image)
-        button.config(image=image, text=overlay)
-        button.image = image
+        image_data['button'].config(image=image, text=overlay)
+        image_data['button'].image = image
+    except tk.TclError:
+        raise SystemExit(0)
 
 
 def refresh_images(x, y):
     '''Refresh images on the grid buttons'''
+
     if not image_list:
         return
 
     vsb.set(x, y)
 
-    canvas_height = canvas.winfo_height()
-    y_srt = canvas.yview()[0]
-    y_end = canvas.yview()[1]
-    y_len = y_end - y_srt
-    total_height = canvas_height / y_len
-    canvas_y_top = int(total_height * y_srt / (GRID_IMG_SZ + BORDER * 2))
-    canvas_y_bot = int(total_height * y_end / (GRID_IMG_SZ + BORDER * 2)) + 1
+    slice_start, slice_end = get_canvas_boundaries()
 
-    for r in range(canvas_y_top, canvas_y_bot):
-        slice_start = r * COL_NBR
-        slice_end = r * COL_NBR + COL_NBR
-
-        visible_buttons = []
-        for button_data in image_list[slice_start:slice_end]:
-            if not button_data['has_image']:
-                visible_buttons.append(button_data)
-                button_data['has_image'] = True
-
-        if visible_buttons:
-            t = threading.Thread(target=render_buttons, args=(visible_buttons,))
+    for n in range(slice_start, slice_end):
+        image_data = image_list[n]
+        if not image_data['has_image'] and len(threading.enumerate()) < 900:
+            image_data['has_image'] = True
+            t = threading.Thread(target=render_buttons, args=(image_data, n,))
             t.daemon = True
             t.start()
 
@@ -229,28 +295,63 @@ def on_mousewheel(event):
 
     if 'buttons_frame' in str(event.widget):
         canvas.yview_scroll(y_steps, 'units')
-    # elif 'folders_frame' in str(event.widget):
-    #     folders_canvas.yview_scroll(y_steps, 'units')
 
 
-def click_grid_image(idx):
+def button_select(button):
+    button.config(bg=ACC_COLOR1, width=GRID_IMG_SZ - 6, height=GRID_IMG_SZ - 6, bd=3, relief='ridge')
+
+
+def button_unselect(button):
+    button.config(bg=BG_COLOR, width=GRID_IMG_SZ, height=GRID_IMG_SZ, bd=0, relief='flat')
+
+
+def click_grid_image(idx, shift=False, control=False, right=False):
     '''Handles clicking on a image on the grid'''
 
     global current_seed
     global prev_button
     global current_index
+    global multi_index
+
+    button = image_list[idx]['button']
+    if control:
+        if button.cget('bg') == BG_COLOR:
+            button_select(button)
+            multi_index.append(idx)
+            button.focus_set()
+        else:
+            button_unselect(button)
+            multi_index.remove(idx)
+        return
+
+    if current_index != idx and shift:
+        if current_index < idx:
+            idx_start, idx_end = current_index, idx
+        else:
+            idx_start, idx_end = idx, current_index
+
+        for i in range(idx_start, idx_end + 1):
+            if i not in multi_index:
+                multi_index.append(i)
+                button = image_list[i]['button']
+                button_select(button)
+                button.focus_set()
+        return
+
+    if (not right and not shift and multi_index) or (right and button.cget('bg') == BG_COLOR):
+        for i in multi_index:
+            button = image_list[i]['button']
+            button_unselect(button)
+        multi_index = []
+
+    if right and button.cget('bg') == ACC_COLOR1:
+        return
+
+    multi_index = [idx]
 
     button = image_list[idx]['button']
     embed_text = image_list[idx]['txt_info']
-
     image = Image.open(image_list[idx]['file'])
-
-    # image_keep = button.image
-    prev_button.config(bg=BG_COLOR, width=GRID_IMG_SZ, height=GRID_IMG_SZ, bd=0, relief='flat')
-    button.config(bg=ACC_COLOR1, width=GRID_IMG_SZ - 6, height=GRID_IMG_SZ - 6, bd=3, relief='ridge')
-
-    # button.update()
-    button.focus_set()
 
     image = resize_image(image, (INFO_IMG_SZ, INFO_IMG_SZ))
     image = ImageTk.PhotoImage(image)
@@ -273,19 +374,28 @@ def click_grid_image(idx):
     text_info['state'] = 'normal'
     text_info.delete('1.0', 'end')
     text_info.insert('insert', embed_text)
-    for match in matches:
-        if match[0].startswith('seed:'):
-            current_seed = match[3]
+    for hit in matches:
+        if hit[0].startswith('seed:'):
+            current_seed = hit[3]
         color = ACC_COLOR2
-        if match[3].strip().replace('.', '').isdigit() \
-                or match[3].strip().replace(' x ', '').isdigit()  \
-                or match[3].strip().replace(' ', '').isdigit():
+        if hit[3].strip().replace('.', '').isdigit() \
+                or hit[3].strip().replace(' x ', '').isdigit()  \
+                or hit[3].strip().replace(' ', '').isdigit():
             color = ACC_COLOR1
-        if match[0].startswith('embedded info'):
+        if hit[0].startswith('embedded info'):
             color = ACC_COLOR2
-        text_info.tag_add(match[0], match[1], match[2])
-        text_info.tag_config(match[0], foreground=color)
+        text_info.tag_add(hit[0], hit[1], hit[2])
+        text_info.tag_config(hit[0], foreground=color)
     text_info['state'] = 'disable'
+
+    if not prev_button:
+        prev_button = button
+
+    # image_keep = button.image
+    button_unselect(prev_button)
+    button_select(button)
+    button.focus_set()
+    # button.update()
 
     # Give a little time for Python to come to it's senses
     time.sleep(0.05)
@@ -295,7 +405,7 @@ def click_grid_image(idx):
     current_index = idx
 
 
-def grid_keys(event, delta, absolute=False):
+def grid_keys(event, delta, absolute=False, select=False):
     '''Navigate grid with the arrow keys.
     event: TK internal
     delta: Image amout to jump
@@ -336,8 +446,13 @@ def grid_keys(event, delta, absolute=False):
     if (button_y <= canvas_y_top):
         canvas.yview_moveto(canvas_position)
 
-    button.invoke()
-    button.focus_set()
+    if select:
+        click_grid_image(current_index, control=True)
+    else:
+        click_grid_image(current_index)
+
+    # button.invoke()
+    # button.focus_set()
 
 
 def maintain_aspect_ratio(event, original, c_full_img, aspect_ratio):
@@ -365,17 +480,16 @@ def maintain_aspect_ratio(event, original, c_full_img, aspect_ratio):
         return 'break'
 
 
-def show_full_image(idx):
-    '''Handles clicking on the image preview'''
+def show_full_image_multi(i):
+    '''Its is here so each window can have its own variable reference'''
 
-    if idx is None:
+    if not image_list:
         return
 
     image_window = tk.Toplevel()
-    image_window.title(f'{current_seed.strip()} - {image_list[idx]["file"]}')
+    image_window.title(f'{image_list[i]["file"]}')
 
-    original = Image.open(image_list[idx]['file'])
-    # original = image_list[idx]['orig_image']
+    original = Image.open(image_list[i]['file'])
 
     # Prevent showing images bigger than the screen size
     max_width = min(original.size[0], image_window.winfo_screenwidth())
@@ -405,31 +519,369 @@ def show_full_image(idx):
     image_window.bind('<Configure>', lambda event: maintain_aspect_ratio(event, original, c_full_img, width / height))
     image_window.bind('<Escape>', lambda event: image_window.destroy())
 
+    image_window.focus_set()
+
+
+def show_full_image(idx):
+    '''Handles clicking on the image preview'''
+
+    if idx is None:
+        return
+
+    # Calling a new function each time so each window has its own variable reference
+    for i in idx:
+        show_full_image_multi(i)
+
 
 def show_image(idx):
 
     if idx is None:
         return
 
-    path = image_list[idx]['file']
+    for i in idx:
+        path = image_list[i]['file']
 
-    if OS == 'Linux':
-        default_app = subprocess.run(['xdg-mime', 'query', 'default', 'inode/directory'],
-                                     stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
+        if OS == 'Linux':
+            default_app = subprocess.run(['xdg-mime', 'query', 'default', 'inode/directory'],
+                                         stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
 
-        if default_app == 'org.kde.dolphin.desktop':
-            subprocess.Popen(['dolphin', path])
+            if default_app == 'org.kde.dolphin.desktop':
+                subprocess.Popen(['dolphin', path])
+            else:
+                default_app == 'nautilus.desktop'
+                subprocess.Popen(['nautilus', path])
+        elif OS == 'Darwin':
+            subprocess.Popen(["open", path])
         else:
-            default_app == 'nautilus.desktop'
-            subprocess.Popen(['nautilus', path])
-    elif OS == 'Darwin':
-        subprocess.Popen(["open", path])
-    else:
-        subprocess.Popen(["explorer", '/open,', path])
+            subprocess.Popen(["explorer", '/open,', path])
 
 
-def open_config():
+def config_requester():
     '''Main configuration window'''
+
+    def test_weight(weight):
+        weight = weight.strip()
+        if weight != 'normal' and weight != 'bold' and weight != 'italic' and weight != '':
+            conf_entries[7].config(bg=ALERT_COLOR)
+        else:
+            conf_entries[7].config(bg=ACC_COLOR1)
+
+    def test_int(widget):
+        entry = widget.get()
+        if not entry.isnumeric():
+            widget.config(bg=ALERT_COLOR)
+        else:
+            widget.config(bg=ACC_COLOR1)
+
+    def change_button_height(size):
+        '''Update the button height configuration box'''
+
+        test_int(conf_entries[6])
+
+        if conf_entries[6]['bg'] != ALERT_COLOR:
+            conf_entries[4].delete(0, 'end')
+            conf_entries[4].insert('insert', int(int(size) * 2.5))
+
+    def pick_color(r, cur_col):
+        '''Open a color picker'''
+
+        # Open an inactive window to be able to disable the main interface
+        dummy_window = tk.Toplevel()
+        dummy_window.withdraw()
+        config.grab_release()
+        dummy_window.grab_set()
+
+        conf_entries[r - 1].delete(0, 'end')
+        color = askcolor(color=cur_col, title=conf_labels[r - 1]['text'], parent=config)[1]
+
+        if not color:
+            color = cur_col
+        conf_entries[r - 1].insert('insert', color)
+
+        dummy_window.destroy()
+        config.grab_set()
+
+        change_color(r)
+
+    def change_color(r):
+        '''Change the selected color'''
+
+        if r < 9 or r > 13:
+            return
+        try:
+            bt_color_list[r - 9]['bg'] = conf_entries[r - 1].get()
+            conf_entries[r - 1].config(bg=ACC_COLOR1)
+        except tk.TclError:
+            conf_entries[r - 1].config(bg=ALERT_COLOR)
+
+    def accept_config(button, conf_entries):
+        '''Close the configuration window applying changes'''
+
+        global COL_NBR
+        global ROW_NBR
+        global GRID_IMG_SZ
+        global INFO_IMG_SZ
+        global BUTT_HEIGHT
+        global FONT
+        global BG_COLOR
+        global FONT_COLOR
+        global ACC_COLOR1
+        global ACC_COLOR2
+        global ALERT_COLOR
+        # global TOP_PATH
+
+        change_button_height(conf_entries[6].get())
+
+        button.focus_set()
+
+        config.update()
+
+        if conf_entries[0]['bg'] != ALERT_COLOR:
+            COL_NBR = int(conf_entries[0].get())
+        if conf_entries[1]['bg'] != ALERT_COLOR:
+            ROW_NBR = int(conf_entries[1].get())
+        if conf_entries[2]['bg'] != ALERT_COLOR:
+            GRID_IMG_SZ = int(conf_entries[2].get())
+        if conf_entries[3]['bg'] != ALERT_COLOR:
+            INFO_IMG_SZ = int(conf_entries[3].get())
+        if conf_entries[4]['bg'] != ALERT_COLOR:
+            BUTT_HEIGHT = int(conf_entries[4].get())
+        if conf_entries[6]['bg'] != ALERT_COLOR \
+                and conf_entries[7]['bg'] != ALERT_COLOR:
+            FONT = (conf_entries[5].get(),
+                    int(conf_entries[6].get()),
+                    conf_entries[7].get())
+            BG_COLOR = bt_color_list[0]['bg']
+            FONT_COLOR = bt_color_list[1]['bg']
+            ACC_COLOR1 = bt_color_list[2]['bg']
+            ACC_COLOR2 = bt_color_list[3]['bg']
+            ALERT_COLOR = bt_color_list[4]['bg']
+        # if conf_entries[13]['bg'] != ALERT_COLOR:
+        #     TOP_PATH = conf_entries[13].get()
+
+        FONT_NAME = FONT[0]
+        FONT_SIZE = FONT[1]
+        FONT_WEIGHT = FONT[2]
+
+        t_scr_width = root.winfo_screenwidth() * 0.9
+        t_scr_height = root.winfo_screenheight() * 0.9
+
+        # Check if the interface will fit on the current screen size
+        if (COL_NBR * GRID_IMG_SZ + INFO_IMG_SZ) > t_scr_width \
+                or (ROW_NBR * GRID_IMG_SZ) > t_scr_height \
+                or INFO_IMG_SZ > t_scr_height:
+            tk.messagebox.showinfo(title='Bad configuration',
+                                   message='Interface elements too big or too many.\n'
+                                           'Will not fit within 90% of the screen.',
+                                   parent=config)
+            return
+
+        if not config_ini.has_section('CONFIGS'):
+            config_ini.add_section('CONFIGS')
+        config_ini.set('CONFIGS', 'number_of_columns', str(COL_NBR))
+        config_ini.set('CONFIGS', 'number_of_lines', str(ROW_NBR))
+        config_ini.set('CONFIGS', 'grid_image_size', str(GRID_IMG_SZ))
+        config_ini.set('CONFIGS', 'preview_image_size', str(INFO_IMG_SZ))
+        config_ini.set('CONFIGS', 'button_height', str(BUTT_HEIGHT))
+        config_ini.set('CONFIGS', 'font_name', FONT_NAME)
+        config_ini.set('CONFIGS', 'font_size', str(FONT_SIZE))
+        config_ini.set('CONFIGS', 'font_weight', FONT_WEIGHT)
+        config_ini.set('CONFIGS', 'background_color', BG_COLOR)
+        config_ini.set('CONFIGS', 'main_color', FONT_COLOR)
+        config_ini.set('CONFIGS', 'accent_color_1', ACC_COLOR1)
+        config_ini.set('CONFIGS', 'accent_color_2', ACC_COLOR2)
+        config_ini.set('CONFIGS', 'alert_color', ALERT_COLOR)
+        # config_ini.set('CONFIGS', 'default_path', TOP_PATH)
+
+        with open(ini_path, 'w') as configfile:
+            config_ini.write(configfile)
+
+        config.destroy()
+        # update_grid()
+        reset_interface()
+
+    def font_requester(r, cur_col):
+        '''Create a font requester'''
+
+        def siz_min_pls(delta, entry):
+            '''Buttons to change the font size'''
+
+            size = int(entry.get())
+            size += delta
+            if size < 1:
+                size = 1
+            entry.delete(0, 'end')
+            entry.insert('insert', size)
+
+            change_font([font_temp[0], int(size), font_temp[2]])
+
+        def font_weight(weight, weight_list):
+            '''Handles clicking on the font weight buttons'''
+
+            global font_temp
+            for item in weight_list:
+                item[0]['bg'] = FONT_COLOR
+                item[0]['fg'] = BG_COLOR
+
+            weight_list[weight][0]['bg'] = BG_COLOR
+            weight_list[weight][0]['fg'] = FONT_COLOR
+
+            font_temp[2] = weight_list[weight][1]
+            font_temp[1] = int(size_entry.get())
+
+            change_font(font_temp)
+
+        def change_font(font_arg):
+            '''Change the current font'''
+
+            global font_temp
+            font_temp = font_arg
+            font_preview.config(font=font_temp)
+
+        def accept_font():
+            '''Close the font requester accepting the changes'''
+
+            conf_entries[4].delete(0, 'end')
+            conf_entries[4].insert('insert', int(int(size_entry.get()) * 2.5))
+            conf_entries[5].delete(0, 'end')
+            conf_entries[5].insert('insert', font_temp[0])
+            conf_entries[6].delete(0, 'end')
+            conf_entries[6].insert('insert', size_entry.get())
+            conf_entries[7].delete(0, 'end')
+            conf_entries[7].insert('insert', font_temp[2])
+            config.grab_set()
+            config.focus_set()
+            folders_req.destroy()
+
+        dummy.focus_set()
+        config.update()
+
+        if conf_entries[5]['bg'] == ALERT_COLOR \
+                or conf_entries[6]['bg'] == ALERT_COLOR \
+                or conf_entries[7]['bg'] == ALERT_COLOR:
+            return
+
+        # global font_box
+        global font_preview
+        global size_entry
+        global font_temp
+        global folders_req
+
+        font_temp = [conf_entries[5].get(),
+                     int(conf_entries[6].get()),
+                     conf_entries[7].get()]
+
+        folders_req = tk.Toplevel()
+        folders_req.title('Font')
+
+        available_fonts = font.families()
+        available_fonts = sorted(available_fonts)
+
+        font_box = tk.Listbox(folders_req, highlightthickness=0, relief='flat', name='font_list',
+                              bg=ACC_COLOR1, fg=BG_COLOR, selectbackground=FONT_COLOR)
+        font_box.grid(row=0, columnspan=3, sticky='news')
+        font_box.option_add('font', FONT)
+
+        sb = ttk.Scrollbar(folders_req, orient='vertical')
+        sb.grid(row=0, column=3, sticky='news')
+
+        font_box.configure(yscrollcommand=sb.set)
+        sb.config(command=font_box.yview)
+
+        config.grab_release()
+        folders_req.grab_set()
+        folders_req.focus_set()
+
+        for fonts in available_fonts:
+            font_box.insert('end', fonts)
+
+        # Duplicate the last element to prevent down key from overflowing the listbox items
+        available_fonts.append(available_fonts[-1])
+
+        font_box.bind("<ButtonRelease-1>", lambda e: change_font(
+                      [available_fonts[font_box.curselection()[0]], int(size_entry.get()), font_temp[2]]))
+
+        font_box.bind("<Up>", lambda e: change_font(
+                      [available_fonts[font_box.curselection()[0] - 1], int(size_entry.get()), font_temp[2]]))
+
+        font_box.bind("<Down>", lambda e: change_font(
+                      [available_fonts[font_box.curselection()[0] + 1], int(size_entry.get()), font_temp[2]]))
+
+        weight_list = []
+        brd_norm_butt = tk.Frame(folders_req, bg=BG_COLOR)
+        brd_norm_butt.grid(row=1, column=0, sticky='nsew')
+        norm_butt = tk.Button(brd_norm_butt, text="normal", bg=FONT_COLOR, fg=BG_COLOR,
+                              activebackground=ACC_COLOR1, bd=0, command=lambda: font_weight(0, weight_list))
+        norm_butt.pack(expand=True, fill='both', pady=1, padx=1)
+        weight_list.append([norm_butt, 'normal'])
+
+        brd_norm_bold = tk.Frame(folders_req, bg=BG_COLOR)
+        brd_norm_bold.grid(row=1, column=1, sticky='nsew')
+        bold_butt = tk.Button(brd_norm_bold, text="bold", bg=FONT_COLOR, fg=BG_COLOR,
+                              activebackground=ACC_COLOR1, bd=0, command=lambda: font_weight(1, weight_list))
+        bold_butt.pack(expand=True, fill='both', pady=1, padx=1)
+        weight_list.append([bold_butt, 'bold'])
+
+        brd_norm_ital = tk.Frame(folders_req, bg=BG_COLOR)
+        brd_norm_ital.grid(row=1, column=2, columnspan=2, sticky='nsew')
+        ital_butt = tk.Button(brd_norm_ital, text="italic", bg=FONT_COLOR, fg=BG_COLOR,
+                              activebackground=ACC_COLOR1, bd=0, command=lambda: font_weight(2, weight_list))
+        ital_butt.pack(expand=True, fill='both', pady=1, padx=1)
+        weight_list.append([ital_butt, 'italic'])
+
+        size_entry = tk.Entry(folders_req, text="cancel", bd=0, bg=ACC_COLOR1, fg=BG_COLOR)
+        size_entry.delete(0, 'end')
+        size_entry.insert('insert', conf_entries[6].get())
+        size_entry.bind('<Return>', lambda e: change_font([font_temp[0], int(size_entry.get()), font_temp[2]]))
+        size_entry.bind('<Tab>', lambda e: change_font([font_temp[0], int(size_entry.get()), font_temp[2]]))
+        size_entry.bind('<FocusOut>', lambda e: change_font([font_temp[0], int(size_entry.get()), font_temp[2]]))
+        size_entry.grid(row=2, column=0, columnspan=2, sticky='nsew')
+
+        brd_siz_frm = tk.Frame(folders_req, bg=BG_COLOR)
+        brd_siz_frm.grid(row=2, column=2, columnspan=2, sticky='nsew')
+
+        brd_siz_min = tk.Frame(brd_siz_frm, bg=BG_COLOR)
+        brd_siz_min.grid(row=0, column=0, sticky='nsew')
+        size_min = tk.Button(brd_siz_min, text="<", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
+                             command=lambda: siz_min_pls(-1, size_entry))
+        size_min.pack(expand=True, fill='both', pady=1, padx=1)
+
+        brd_siz_pls = tk.Frame(brd_siz_frm, bg=BG_COLOR)
+        brd_siz_pls.grid(row=0, column=1, sticky='nsew')
+        size_pls = tk.Button(brd_siz_pls, text=">", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
+                             command=lambda: siz_min_pls(1, size_entry))
+        size_pls.pack(expand=True, fill='both', pady=1, padx=1)
+
+        brd_siz_frm.columnconfigure(0, weight=1)
+        brd_siz_frm.columnconfigure(1, weight=1)
+
+        brd_ok_butt = tk.Frame(folders_req, bg=BG_COLOR)
+        brd_ok_butt.grid(row=3, column=0, columnspan=2, sticky='nsew')
+        ok_butt = tk.Button(brd_ok_butt, text="OK", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
+                            activebackground=ACC_COLOR1, command=accept_font)
+        ok_butt.pack(expand=True, fill='both', pady=1, padx=1)
+
+        brd_cancel_butt = tk.Frame(folders_req, bg=BG_COLOR)
+        brd_cancel_butt.grid(row=3, column=2, columnspan=2, sticky='nsew')
+        cancel_butt = tk.Button(brd_cancel_butt, text="cancel", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
+                                activebackground=ACC_COLOR1, command=folders_req.destroy)
+        cancel_butt.pack(expand=True, fill='both', pady=1, padx=1)
+
+        font_preview = tk.Entry(folders_req, justify='center', bd=0,
+                                bg=BG_COLOR, fg=FONT_COLOR, font=(FONT[0], FONT[1], FONT[2]))
+        font_preview.insert('insert', 'Diffusion')
+        font_preview.grid(row=4, columnspan=4, sticky='nsew')
+
+        folders_req.rowconfigure(0, weight=1)
+        folders_req.columnconfigure(0, weight=1)
+        folders_req.columnconfigure(1, weight=1)
+        folders_req.columnconfigure(2, weight=1)
+        folders_req.columnconfigure(3, weight=0)
+
+        folders_req.resizable(True, True)
+        folders_req.update_idletasks()
+        font_req_width = int(config.winfo_width() / 2)
+        folders_req.geometry(f'{font_req_width}x{config.winfo_height()}+{config.winfo_x()}+{config.winfo_y()}')
 
     global config
     global conf_entries
@@ -553,402 +1005,97 @@ def open_config():
     config.geometry(f'+{x}+{y}')
 
 
-def test_weight(weight):
-    weight = weight.strip()
-    if weight != 'normal' and weight != 'bold' and weight != 'italic' and weight != '':
-        conf_entries[7].config(bg=ALERT_COLOR)
-    else:
-        conf_entries[7].config(bg=ACC_COLOR1)
-
-
-def test_int(widget):
-    entry = widget.get()
-    if not entry.isnumeric():
-        widget.config(bg=ALERT_COLOR)
-    else:
-        widget.config(bg=ACC_COLOR1)
-
-
-def change_button_height(size):
-    '''Update the button height configuration box'''
-
-    test_int(conf_entries[6])
-
-    if conf_entries[6]['bg'] != ALERT_COLOR:
-        conf_entries[4].delete(0, 'end')
-        conf_entries[4].insert('insert', int(int(size) * 2.5))
-
-
-def pick_color(r, cur_col):
-    '''Open a color picker'''
-
-    # Open an inactive window to be able to disable the main interface
-    dummy_window = tk.Toplevel()
-    dummy_window.withdraw()
-    config.grab_release()
-    dummy_window.grab_set()
-
-    conf_entries[r - 1].delete(0, 'end')
-    color = askcolor(color=cur_col, title=conf_labels[r - 1]['text'], parent=config)[1]
-
-    if not color:
-        color = cur_col
-    conf_entries[r - 1].insert('insert', color)
-
-    dummy_window.destroy()
-    config.grab_set()
-
-    change_color(r)
-
-
-def change_color(r):
-    '''Change the selected color'''
-
-    if r < 9 or r > 13:
-        return
-    try:
-        bt_color_list[r - 9]['bg'] = conf_entries[r - 1].get()
-        conf_entries[r - 1].config(bg=ACC_COLOR1)
-    except tk.TclError:
-        conf_entries[r - 1].config(bg=ALERT_COLOR)
-
-
-def accept_config(button, conf_entries):
-    '''Close the configuration window applying changes'''
-
-    global COL_NBR
-    global ROW_NBR
-    global GRID_IMG_SZ
-    global INFO_IMG_SZ
-    global BUTT_HEIGHT
-    global FONT
-    global BG_COLOR
-    global FONT_COLOR
-    global ACC_COLOR1
-    global ACC_COLOR2
-    global ALERT_COLOR
-    # global TOP_PATH
-
-    change_button_height(conf_entries[6].get())
-
-    button.focus_set()
-
-    config.update()
-
-    if conf_entries[0]['bg'] != ALERT_COLOR:
-        COL_NBR = int(conf_entries[0].get())
-    if conf_entries[1]['bg'] != ALERT_COLOR:
-        ROW_NBR = int(conf_entries[1].get())
-    if conf_entries[2]['bg'] != ALERT_COLOR:
-        GRID_IMG_SZ = int(conf_entries[2].get())
-    if conf_entries[3]['bg'] != ALERT_COLOR:
-        INFO_IMG_SZ = int(conf_entries[3].get())
-    if conf_entries[4]['bg'] != ALERT_COLOR:
-        BUTT_HEIGHT = int(conf_entries[4].get())
-    if conf_entries[6]['bg'] != ALERT_COLOR \
-            and conf_entries[7]['bg'] != ALERT_COLOR:
-        FONT = (conf_entries[5].get(),
-                int(conf_entries[6].get()),
-                conf_entries[7].get())
-        BG_COLOR = bt_color_list[0]['bg']
-        FONT_COLOR = bt_color_list[1]['bg']
-        ACC_COLOR1 = bt_color_list[2]['bg']
-        ACC_COLOR2 = bt_color_list[3]['bg']
-        ALERT_COLOR = bt_color_list[4]['bg']
-    # if conf_entries[13]['bg'] != ALERT_COLOR:
-    #     TOP_PATH = conf_entries[13].get()
-
-    FONT_NAME = FONT[0]
-    FONT_SIZE = FONT[1]
-    FONT_WEIGHT = FONT[2]
-
-    t_scr_width = root.winfo_screenwidth() * 0.9
-    t_scr_height = root.winfo_screenheight() * 0.9
-
-    # Check if the interface will fit on the current screen size
-    if (COL_NBR * GRID_IMG_SZ + INFO_IMG_SZ) > t_scr_width \
-            or (ROW_NBR * GRID_IMG_SZ) > t_scr_height \
-            or INFO_IMG_SZ > t_scr_height:
-        tk.messagebox.showinfo(title='Bad configuration',
-                               message='Interface elements too big or too many.\n'
-                                       'Will not fit within 90% of the screen.',
-                               parent=config)
-        return
-
-    if not config_ini.has_section('CONFIGS'):
-        config_ini.add_section('CONFIGS')
-    config_ini.set('CONFIGS', 'number_of_columns', str(COL_NBR))
-    config_ini.set('CONFIGS', 'number_of_lines', str(ROW_NBR))
-    config_ini.set('CONFIGS', 'grid_image_size', str(GRID_IMG_SZ))
-    config_ini.set('CONFIGS', 'preview_image_size', str(INFO_IMG_SZ))
-    config_ini.set('CONFIGS', 'button_height', str(BUTT_HEIGHT))
-    config_ini.set('CONFIGS', 'font_name', FONT_NAME)
-    config_ini.set('CONFIGS', 'font_size', str(FONT_SIZE))
-    config_ini.set('CONFIGS', 'font_weight', FONT_WEIGHT)
-    config_ini.set('CONFIGS', 'background_color', BG_COLOR)
-    config_ini.set('CONFIGS', 'main_color', FONT_COLOR)
-    config_ini.set('CONFIGS', 'accent_color_1', ACC_COLOR1)
-    config_ini.set('CONFIGS', 'accent_color_2', ACC_COLOR2)
-    config_ini.set('CONFIGS', 'alert_color', ALERT_COLOR)
-    # config_ini.set('CONFIGS', 'default_path', TOP_PATH)
-
-    with open(ini_path, 'w') as configfile:
-        config_ini.write(configfile)
-
-    config.destroy()
-    # update_grid()
-    reset_interface()
-
-
-def font_requester(r, cur_col):
-    '''Create a font requester'''
-
-    dummy.focus_set()
-    config.update()
-
-    if conf_entries[5]['bg'] == ALERT_COLOR \
-            or conf_entries[6]['bg'] == ALERT_COLOR \
-            or conf_entries[7]['bg'] == ALERT_COLOR:
-        return
-
-    # global font_box
-    global font_preview
-    global size_entry
-    global font_temp
-    global folders_req
-
-    font_temp = [conf_entries[5].get(),
-                 int(conf_entries[6].get()),
-                 conf_entries[7].get()]
-
-    folders_req = tk.Toplevel()
-    folders_req.title('Font')
-
-    available_fonts = font.families()
-    available_fonts = sorted(available_fonts)
-
-    font_box = tk.Listbox(folders_req, highlightthickness=0, relief='flat', name='font_list',
-                          bg=ACC_COLOR1, fg=BG_COLOR, selectbackground=FONT_COLOR)
-    font_box.grid(row=0, columnspan=3, sticky='news')
-    font_box.option_add('font', FONT)
-
-    sb = tk.Scrollbar(folders_req, orient='vertical')
-    sb.grid(row=0, column=3, sticky='news')
-
-    font_box.configure(yscrollcommand=sb.set)
-    sb.config(command=font_box.yview)
-
-    config.grab_release()
-    folders_req.grab_set()
-    folders_req.focus_set()
-
-    for fonts in available_fonts:
-        font_box.insert('end', fonts)
-
-    # Duplicate the last element to prevent down key from overflowing the listbox items
-    available_fonts.append(available_fonts[-1])
-
-    font_box.bind("<ButtonRelease-1>", lambda e: change_font(
-                  [available_fonts[font_box.curselection()[0]], int(size_entry.get()), font_temp[2]]))
-
-    font_box.bind("<Up>", lambda e: change_font(
-                  [available_fonts[font_box.curselection()[0] - 1], int(size_entry.get()), font_temp[2]]))
-
-    font_box.bind("<Down>", lambda e: change_font(
-                  [available_fonts[font_box.curselection()[0] + 1], int(size_entry.get()), font_temp[2]]))
-
-    weight_list = []
-    brd_norm_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_norm_butt.grid(row=1, column=0, sticky='nsew')
-    norm_butt = tk.Button(brd_norm_butt, text="normal", bg=FONT_COLOR, fg=BG_COLOR,
-                          activebackground=ACC_COLOR1, bd=0, command=lambda: font_weight(0, weight_list))
-    norm_butt.pack(expand=True, fill='both', pady=1, padx=1)
-    weight_list.append([norm_butt, 'normal'])
-
-    brd_norm_bold = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_norm_bold.grid(row=1, column=1, sticky='nsew')
-    bold_butt = tk.Button(brd_norm_bold, text="bold", bg=FONT_COLOR, fg=BG_COLOR,
-                          activebackground=ACC_COLOR1, bd=0, command=lambda: font_weight(1, weight_list))
-    bold_butt.pack(expand=True, fill='both', pady=1, padx=1)
-    weight_list.append([bold_butt, 'bold'])
-
-    brd_norm_ital = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_norm_ital.grid(row=1, column=2, columnspan=2, sticky='nsew')
-    ital_butt = tk.Button(brd_norm_ital, text="italic", bg=FONT_COLOR, fg=BG_COLOR,
-                          activebackground=ACC_COLOR1, bd=0, command=lambda: font_weight(2, weight_list))
-    ital_butt.pack(expand=True, fill='both', pady=1, padx=1)
-    weight_list.append([ital_butt, 'italic'])
-
-    size_entry = tk.Entry(folders_req, text="cancel", bd=0, bg=ACC_COLOR1, fg=BG_COLOR)
-    size_entry.delete(0, 'end')
-    size_entry.insert('insert', conf_entries[6].get())
-    size_entry.bind('<Return>', lambda e: change_font([font_temp[0], int(size_entry.get()), font_temp[2]]))
-    size_entry.bind('<Tab>', lambda e: change_font([font_temp[0], int(size_entry.get()), font_temp[2]]))
-    size_entry.bind('<FocusOut>', lambda e: change_font([font_temp[0], int(size_entry.get()), font_temp[2]]))
-    size_entry.grid(row=2, column=0, columnspan=2, sticky='nsew')
-
-    brd_siz_frm = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_siz_frm.grid(row=2, column=2, columnspan=2, sticky='nsew')
-
-    brd_siz_min = tk.Frame(brd_siz_frm, bg=BG_COLOR)
-    brd_siz_min.grid(row=0, column=0, sticky='nsew')
-    size_min = tk.Button(brd_siz_min, text="<", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
-                         command=lambda: siz_min_pls(-1, size_entry))
-    size_min.pack(expand=True, fill='both', pady=1, padx=1)
-
-    brd_siz_pls = tk.Frame(brd_siz_frm, bg=BG_COLOR)
-    brd_siz_pls.grid(row=0, column=1, sticky='nsew')
-    size_pls = tk.Button(brd_siz_pls, text=">", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
-                         command=lambda: siz_min_pls(1, size_entry))
-    size_pls.pack(expand=True, fill='both', pady=1, padx=1)
-
-    brd_siz_frm.columnconfigure(0, weight=1)
-    brd_siz_frm.columnconfigure(1, weight=1)
-
-    brd_ok_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_ok_butt.grid(row=3, column=0, columnspan=2, sticky='nsew')
-    ok_butt = tk.Button(brd_ok_butt, text="OK", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
-                        activebackground=ACC_COLOR1, command=accept_font)
-    ok_butt.pack(expand=True, fill='both', pady=1, padx=1)
-
-    brd_cancel_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_cancel_butt.grid(row=3, column=2, columnspan=2, sticky='nsew')
-    cancel_butt = tk.Button(brd_cancel_butt, text="cancel", bd=0, bg=FONT_COLOR, fg=BG_COLOR,
-                            activebackground=ACC_COLOR1, command=folders_req.destroy)
-    cancel_butt.pack(expand=True, fill='both', pady=1, padx=1)
-
-    font_preview = tk.Entry(folders_req, justify='center', bd=0,
-                            bg=BG_COLOR, fg=FONT_COLOR, font=(FONT[0], FONT[1], FONT[2]))
-    font_preview.insert('insert', 'Diffusion')
-    font_preview.grid(row=4, columnspan=4, sticky='nsew')
-
-    folders_req.rowconfigure(0, weight=1)
-    folders_req.columnconfigure(0, weight=1)
-    folders_req.columnconfigure(1, weight=1)
-    folders_req.columnconfigure(2, weight=1)
-    folders_req.columnconfigure(3, weight=0)
-
-    folders_req.resizable(True, True)
-    folders_req.update_idletasks()
-    font_req_width = int(config.winfo_width() / 2)
-    folders_req.geometry(f'{font_req_width}x{config.winfo_height()}+{config.winfo_x()}+{config.winfo_y()}')
-
-
-def siz_min_pls(delta, entry):
-    '''Buttons to change the font size'''
-
-    size = int(entry.get())
-    size += delta
-    if size < 1:
-        size = 1
-    entry.delete(0, 'end')
-    entry.insert('insert', size)
-
-    change_font([font_temp[0], int(size), font_temp[2]])
-
-
-def font_weight(weight, weight_list):
-    '''Handles clicking on the font weight buttons'''
-
-    global font_temp
-    for item in weight_list:
-        item[0]['bg'] = FONT_COLOR
-        item[0]['fg'] = BG_COLOR
-
-    weight_list[weight][0]['bg'] = BG_COLOR
-    weight_list[weight][0]['fg'] = FONT_COLOR
-
-    font_temp[2] = weight_list[weight][1]
-    font_temp[1] = int(size_entry.get())
-
-    change_font(font_temp)
-
-
-def change_font(font_arg):
-    '''Change the current font'''
-
-    global font_temp
-    font_temp = font_arg
-    font_preview.config(font=font_temp)
-
-
-def accept_font():
-    '''Close the font requester accepting the changes'''
-
-    conf_entries[4].delete(0, 'end')
-    conf_entries[4].insert('insert', int(int(size_entry.get()) * 2.5))
-    conf_entries[5].delete(0, 'end')
-    conf_entries[5].insert('insert', font_temp[0])
-    conf_entries[6].delete(0, 'end')
-    conf_entries[6].insert('insert', size_entry.get())
-    conf_entries[7].delete(0, 'end')
-    conf_entries[7].insert('insert', font_temp[2])
-    config.grab_set()
-    config.focus_set()
-    folders_req.destroy()
-
-
-def treeview_sort_column(widget, col, reverse):
-    l = [(widget.set(k, col), k) for k in widget.get_children('')]
-    l.sort(reverse=reverse)
-
-    for index, (_, k) in enumerate(l):
-        widget.move(k, '', index)
-
-    widget.heading(col, command=lambda: treeview_sort_column(widget, col, not reverse))
-
-
-def add_folder(widget, parent):
-    '''Add path'''
-
-    folder_selected = filedialog.askdirectory(parent=parent)
-
-    if folder_selected:
-        widget.insert('', 'end', text=('', folder_selected), value=('', folder_selected))
-
-
-def toggle_subfolders(widget):
-    if not widget.selection():
-        return
-
-    for item in widget.selection():
-        item_values = widget.item(item)['values']
-        subfolders = 'YES' if item_values[0] == '' else ''
-        widget.item(item, text=(subfolders, item_values[1]), value=(subfolders, item_values[1]))
-
-
-def treeview_delete(widget, parent):
-    if not widget.selection():
-        return
-    quantity = len(widget.selection())
-    message = f'{widget.item(widget.focus())["values"][1]} ' if quantity == 1 else f'{len(widget.selection())} items'
-    query = tk.messagebox.askquestion(title='Delete item', message=f'Really delete {message}?', parent=parent)
-    if query == 'yes':
-        for item in widget.selection():
-            widget.delete(item)
-
-
-def save_folders(widget, parent):
-    global folders
-
-    folders = []
-    for item in widget.get_children():
-        child = widget.item(item)["values"]
-        subfolders = '1' if child[0] == 'YES' else '0'
-        folders.append((subfolders, child[1]))
-
-    json_object = json.dumps(folders)
-
-    with open(FOLDERS_FILE, "w") as f:
-        f.write(json_object)
-
-    parent.destroy()
-    update_grid()
-    # reset_interface()
-
-
 def folders_requester():
     '''Create a folders requester'''
+
+    def tree_sort_column(widget, col, reverse):
+        l = [(widget.set(k, col), k) for k in widget.get_children('')]
+        l.sort(reverse=reverse)
+
+        for index, (_, k) in enumerate(l):
+            widget.move(k, '', index)
+
+        widget.heading(col, command=lambda: tree_sort_column(widget, col, not reverse))
+
+    def tree_double_click(event, widget, parent):
+        column_subf = widget.column('subf', 'width')
+        column_path = widget.column('path', 'width')
+        column_active = widget.column('active', 'width')
+
+        if event.x <= column_subf:
+            toggle_subfolders(widget)
+        elif event.x <= column_path + column_subf:
+            change_folder(widget, parent)
+        elif event.x <= column_active + column_path + column_subf:
+            toggle_active_folders(widget)
+
+    def add_folder(widget, parent):
+        '''Add path'''
+
+        folder_selected = filedialog.askdirectory(parent=parent)
+
+        if folder_selected:
+            folder_selected = os.path.normpath(folder_selected)
+            widget.insert('', 'end', text=('', folder_selected, ''), value=('', folder_selected, ''))
+
+    def change_folder(widget, parent):
+        '''Change path'''
+        if not widget.selection():
+            return
+
+        folder_selected = filedialog.askdirectory(parent=parent)
+
+        if folder_selected:
+            folder_selected = os.path.normpath(folder_selected)
+            item = widget.selection()[0]
+            widget.item(item, text=('', folder_selected, ''), value=('', folder_selected, ''))
+
+    def toggle_subfolders(widget):
+        if not widget.selection():
+            return
+
+        for item in widget.selection():
+            item_values = widget.item(item)['values']
+            subfolders = 'YES' if item_values[0] == '' else ''
+            widget.item(item, text=(subfolders, item_values[1], item_values[2]), value=(subfolders, item_values[1], item_values[2]))
+
+    def toggle_active_folders(widget):
+        if not widget.selection():
+            return
+
+        for item in widget.selection():
+            item_values = widget.item(item)['values']
+            active = 'NO' if item_values[2] == '' else ''
+            widget.item(item, text=(item_values[0], item_values[1], active), value=(item_values[0], item_values[1], active))
+
+    def delete_folders(widget, parent):
+        if not widget.selection():
+            return
+        quantity = len(widget.selection())
+        message = f'{widget.item(widget.focus())["values"][1]} ' if quantity == 1 else f'{len(widget.selection())} items'
+        query = tk.messagebox.askquestion(title='Delete item', message=f'Really delete {message}?', parent=parent)
+        if query == 'yes':
+            for item in widget.selection():
+                widget.delete(item)
+
+    def save_folders(widget, parent):
+        global folders
+
+        folders = []
+        for item in widget.get_children():
+            child = widget.item(item)["values"]
+            subfolders = '1' if child[0] == 'YES' else '0'
+            active = '0' if child[2] == 'NO' else '1'
+            folders.append((subfolders, child[1], active))
+
+        json_object = json.dumps(folders)
+
+        with open(FOLDERS_FILE, "w") as f:
+            f.write(json_object)
+
+        parent.destroy()
+
+        update_grid()
 
     folders_req = tk.Toplevel()
     folders_req.title('Paths')
@@ -957,66 +1104,100 @@ def folders_requester():
     folders_req.grab_set()
     folders_req.focus_set()
 
-    folders_tree = ttk.Treeview(folders_req, column=('subf', 'path'), show='headings', height=100)
-    folders_tree.heading('#0', text=' \n')
-    folders_tree.heading('subf', text='subf', command=lambda: treeview_sort_column(folders_tree, 'subf', False))
-    folders_tree.heading('path', text='paths', command=lambda: treeview_sort_column(folders_tree, 'path', False))
-    folders_tree.column('subf', width=FONT[1] * 3, stretch='no')
-    folders_tree.option_add('*font', FONT)
-    folders_tree.grid(row=0, columnspan=4, sticky='news')
+    folders_req.rowconfigure(0, weight=1)
+    folders_req.columnconfigure(0, weight=1)
+    folders_req.columnconfigure(1, weight=0)
 
-    sb_folders = tk.Scrollbar(folders_req, orient='vertical')
-    sb_folders.grid(row=0, column=4, sticky='news')
+    folders_tree = ttk.Treeview(folders_req, column=('subf', 'path', 'active'), show='headings', height=100)
+    folders_tree.heading('#0', text=' \n\n')
+    folders_tree.heading('subf', text='subf\n', command=lambda: tree_sort_column(folders_tree, 'subf', False))
+    folders_tree.heading('path', text='paths\n', command=lambda: tree_sort_column(folders_tree, 'path', False))
+    folders_tree.heading('active', text='active\n', command=lambda: tree_sort_column(folders_tree, 'active', False))
+    folders_tree.column('subf', width=FONT[1] * 3, stretch='no')
+    folders_tree.column('active', width=FONT[1] * 4, stretch='no')
+    folders_tree.option_add('*font', FONT)
+    folders_tree.grid(row=0, sticky='news')
+
+    folders_tree.bind("<Double-1>", lambda event: tree_double_click(event, folders_tree, folders_req))
+    folders_tree.bind("<Return>", lambda event: toggle_subfolders(folders_tree))
+    folders_tree.bind("<space>", lambda event: toggle_subfolders(folders_tree))
+    folders_tree.bind("<Shift-Return>", lambda event: toggle_active_folders(folders_tree))
+    folders_tree.bind("<Shift-space>", lambda event: toggle_active_folders(folders_tree))
+
+    sb_folders = ttk.Scrollbar(folders_req, orient='vertical')
+    sb_folders.grid(row=0, column=1, sticky='news')
     folders_tree.configure(yscrollcommand=sb_folders.set)
     sb_folders.config(command=folders_tree.yview)
 
     for folder in folders:
         recursive = 'YES' if folder[0] == '1' else ''
-        folders_tree.insert('', 'end', text=(recursive, folder[1]), value=(recursive, folder[1]))
+        active = 'NO' if folder[2] == '0' else ''
+        folders_tree.insert('', 'end', text=(recursive, folder[1], active), value=(recursive, folder[1], active))
 
-    brd_get_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_get_butt.grid(row=2, column=0, sticky='nsew')
+    brd_upper_butt = tk.Frame(folders_req, bg=BG_COLOR)
+    brd_upper_butt.grid(row=2, column=0, columnspan=2, sticky='nsew')
+
+    brd_upper_butt.columnconfigure(0, weight=1)
+    brd_upper_butt.columnconfigure(1, weight=1)
+    brd_upper_butt.columnconfigure(2, weight=1)
+    brd_upper_butt.columnconfigure(3, weight=1)
+    brd_upper_butt.columnconfigure(4, weight=1)
+    brd_upper_butt.columnconfigure(5, weight=1)
+
+    brd_get_butt = tk.Frame(brd_upper_butt, bg=BG_COLOR)
+    brd_get_butt.grid(row=0, column=0, sticky='nsew')
     get_butt = tk.Button(brd_get_butt, text="add", bg=FONT_COLOR, fg=BG_COLOR,
                          activebackground=ACC_COLOR1, bd=0)
     get_butt.bind('<Button-1>', lambda event: add_folder(folders_tree, folders_req))
     get_butt.pack(expand=True, fill='both', pady=1, padx=1)
 
-    brd_open_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_open_butt.grid(row=2, column=1, sticky='nsew')
+    brd_change_butt = tk.Frame(brd_upper_butt, bg=BG_COLOR)
+    brd_change_butt.grid(row=0, column=1, sticky='nsew')
+    change_butt = tk.Button(brd_change_butt, text="change", bg=FONT_COLOR, fg=BG_COLOR,
+                            activebackground=ACC_COLOR1, bd=0, command=lambda: change_folder(folders_tree, folders_req))
+    change_butt.pack(expand=True, fill='both', pady=1, padx=1)
+
+    brd_open_butt = tk.Frame(brd_upper_butt, bg=BG_COLOR)
+    brd_open_butt.grid(row=0, column=2, sticky='nsew')
     open_butt = tk.Button(brd_open_butt, text="open", bg=FONT_COLOR, fg=BG_COLOR,
                           activebackground=ACC_COLOR1, bd=0, command=lambda: explore_folder(folders_tree.item(folders_tree.focus())))
     open_butt.pack(expand=True, fill='both', pady=1, padx=1)
 
-    brd_subf_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_subf_butt.grid(row=2, column=2, sticky='nsew')
+    brd_subf_butt = tk.Frame(brd_upper_butt, bg=BG_COLOR)
+    brd_subf_butt.grid(row=0, column=3, sticky='nsew')
     subf_butt = tk.Button(brd_subf_butt, text="toggle subfolders", bg=FONT_COLOR, fg=BG_COLOR,
                           activebackground=ACC_COLOR1, bd=0, command=lambda: toggle_subfolders(folders_tree))
     subf_butt.pack(expand=True, fill='both', pady=1, padx=1)
 
-    brd_del_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_del_butt.grid(row=2, column=3, columnspan=2, sticky='nsew')
+    brd_active_butt = tk.Frame(brd_upper_butt, bg=BG_COLOR)
+    brd_active_butt.grid(row=0, column=4, sticky='nsew')
+    active_butt = tk.Button(brd_active_butt, text="toggle active", bg=FONT_COLOR, fg=BG_COLOR,
+                            activebackground=ACC_COLOR1, bd=0, command=lambda: toggle_active_folders(folders_tree))
+    active_butt.pack(expand=True, fill='both', pady=1, padx=1)
+
+    brd_del_butt = tk.Frame(brd_upper_butt, bg=BG_COLOR)
+    brd_del_butt.grid(row=0, column=5, sticky='nsew')
     del_butt = tk.Button(brd_del_butt, text="delete", bg=ALERT_COLOR, fg=BG_COLOR,
-                         activebackground=ACC_COLOR1, bd=0)
-    del_butt.bind('<Button-1>', lambda event: treeview_delete(folders_tree, folders_req))
+                         activebackground=ACC_COLOR1, bd=0, command=lambda: delete_folders(folders_tree, folders_req))
     del_butt.pack(expand=True, fill='both', pady=1, padx=1)
 
-    brd_ok_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_ok_butt.grid(row=3, column=0, columnspan=2, sticky='nsew')
+    brd_lower_butt = tk.Frame(folders_req, bg=BG_COLOR)
+    brd_lower_butt.grid(row=3, column=0, columnspan=2, sticky='nsew')
+
+    brd_lower_butt.columnconfigure(0, weight=1)
+    brd_lower_butt.columnconfigure(1, weight=1)
+
+    brd_ok_butt = tk.Frame(brd_lower_butt, bg=BG_COLOR)
+    brd_ok_butt.grid(row=0, column=0, sticky='nsew')
     ok_butt = tk.Button(brd_ok_butt, text='OK (rebuild)', bd=0, bg=FONT_COLOR, fg=BG_COLOR,
                         activebackground=ACC_COLOR1, command=lambda: save_folders(folders_tree, folders_req))
     ok_butt.pack(expand=True, fill='both', pady=1, padx=1)
 
-    brd_cancel_butt = tk.Frame(folders_req, bg=BG_COLOR)
-    brd_cancel_butt.grid(row=3, column=2, columnspan=3, sticky='nsew')
+    brd_cancel_butt = tk.Frame(brd_lower_butt, bg=BG_COLOR)
+    brd_cancel_butt.grid(row=0, column=1, sticky='nsew')
     cancel_butt = tk.Button(brd_cancel_butt, text='cancel', bd=0, bg=FONT_COLOR, fg=BG_COLOR,
                             activebackground=ACC_COLOR1, command=folders_req.destroy)
     cancel_butt.pack(expand=True, fill='both', pady=1, padx=1)
-
-    folders_req.rowconfigure(0, weight=1)
-    folders_req.columnconfigure(0, weight=1)
-    folders_req.columnconfigure(1, weight=1)
-    folders_req.columnconfigure(2, weight=1)
-    folders_req.columnconfigure(3, weight=1)
 
     folders_req.resizable(True, True)
     folders_req.update_idletasks()
@@ -1046,50 +1227,47 @@ def copy_to_clipboard(event, info=''):
         return
 
 
-def explore_folder(path, r=None):
+def explore_folder(path, select=False):
     '''Open explorer on the current location'''
 
-    if OS == 'Linux':
-        select = '--select'
-    elif OS == 'Darwin':
-        select = '-R'
-    else:
-        select = '/select,'
+    if not image_list:
+        return
 
     if not path or path == 0:
         return
-    elif isinstance(path, int):
-        path = image_list[path]['file']
-    elif isinstance(path, dict):
+
+    if isinstance(path, dict):
         if not path['values']:
             return
 
-        path = path['values'][1]
+        path = [path['values'][1]]
+
+    for p in path:
+
+        if isinstance(p, int):
+            p = image_list[p]['file']
+
+        p = os.path.normpath(p)
 
         if OS == 'Linux':
-            select = ''
+            option = '--select' if select else ''
+            default_app = subprocess.run(['xdg-mime', 'query', 'default', 'inode/directory'],
+                                         stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
+
+            if default_app == 'org.kde.dolphin.desktop':
+                subprocess.Popen(['dolphin', option, p])
+            elif default_app == 'nautilus.desktop':
+                subprocess.Popen(['nautilus', option, p])
+            else:
+                subprocess.Popen(['xdg-open', option, p])
+
         elif OS == 'Darwin':
-            select = ''
+            option = '-R' if select else ''
+            subprocess.Popen(["open", option, p])
+
         else:
-            select = '/open,'
-
-    path = os.path.normpath(path)
-
-    if OS == 'Linux':
-        default_app = subprocess.run(['xdg-mime', 'query', 'default', 'inode/directory'],
-                                     stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
-
-        if default_app == 'org.kde.dolphin.desktop':
-            subprocess.Popen(['dolphin', select, path])
-        elif default_app == 'nautilus.desktop':
-            subprocess.Popen(['nautilus', select, path])
-        else:
-            subprocess.Popen(['xdg-open', select, path])
-
-    elif OS == 'Darwin':
-        subprocess.Popen(["open", select, path])
-    else:
-        subprocess.Popen(["explorer ", select, path])
+            option = '/select,' if select else '/open,'
+            subprocess.Popen(["explorer ", option, p])
 
 
 def save_info(idx, ask=False):
@@ -1098,21 +1276,22 @@ def save_info(idx, ask=False):
     if not idx:
         return
 
-    embed_text = image_list[idx]['txt_info']
+    for i in idx:
+        embed_text = image_list[i]['txt_info']
 
-    orig_file = image_list[idx]['file']
-    orig_file = os.path.splitext(orig_file)[0]
-    orig_file = f'{orig_file}.txt'
-    orig_name = os.path.basename(orig_file)
+        orig_file = image_list[i]['file']
+        orig_file = os.path.splitext(orig_file)[0]
+        orig_file = f'{orig_file}.txt'
+        orig_name = os.path.basename(orig_file)
 
-    if ask:
-        orig_file = filedialog.asksaveasfile(initialfile=orig_name)
-        if not orig_file:
-            return
-        orig_file = orig_file.name
+        if ask:
+            orig_file = filedialog.asksaveasfile(initialfile=orig_name)
+            if not orig_file:
+                continue
+            orig_file = orig_file.name
 
-    with open(orig_file, 'w') as f:
-        f.write(embed_text)
+        with open(orig_file, 'w') as f:
+            f.write(embed_text)
 
 
 def reset_interface():
@@ -1132,13 +1311,36 @@ def clear_info():
     text_info['state'] = 'disable'
 
 
+def parse_key_value(text):
+    # Regular expression pattern to extract key-value pairs
+    pattern = r'([^:]+):\s*("[^"\\]*(?:\\.[^"\\]*)*"|[^,\n]+)'
+    text = text.replace('\\"', "'")
+    matches = re.findall(pattern, text)
+    key_values = {}
+    for match in matches:
+        key = match[0].strip()  # Strip leading/trailing spaces
+        value = match[1].strip('"')  # Strip quotes if present
+        key_values[key] = value
+    return key_values
+
+
 def read_image_info(original_image, image_path):
     '''Read the images embedded information'''
+
+    def flatten_list(orig_list):
+        if orig_list == []:
+            return orig_list
+        if isinstance(orig_list[0], list):
+            return flatten_list(orig_list[0]) + flatten_list(orig_list[1:])
+        return orig_list[:1] + flatten_list(orig_list[1:])
+
+    global new_pars
 
     source = ''
     embed = OrderedDict()
     embed_par = OrderedDict()
     image_format = original_image.format.upper()
+    metadata_error = None
 
     if image_format == 'PNG':
         embed = original_image.text
@@ -1161,14 +1363,36 @@ def read_image_info(original_image, image_path):
                 else:
                     embed = {'parameters': embed}
 
-    metadata_error = []
     if embed:
         try:
             if isinstance(embed, int) or isinstance(embed, str):
                 embed = {}
 
-            if 'parameters' in embed.keys():
-                source = 'automatic1111'
+            is_fooocus = ''
+            if 'fooocus_scheme' in embed.keys():
+                is_fooocus = 'pure'
+                if embed['fooocus_scheme'] == 'a1111':
+                    embed = {'parameters': embed['parameters']}
+                    is_fooocus = 'a1111'
+
+            if is_fooocus == 'pure':
+                source = 'fooocus'
+                parameters = json.loads(embed['parameters'])
+                for par in parameters:
+                    title = par
+                    title = title.strip().lower()
+                    content = parameters[par]
+                    if isinstance(content, list):
+                        content = flatten_list(content)
+                        content = map(str, content)
+                        content = ', '.join(content)
+                    if isinstance(content, int) or isinstance(content, float):
+                        content = str(content)
+                    content = content.strip().lower()
+                    embed_par[title] = content
+
+            elif 'parameters' in embed.keys():
+                source = 'fooocus' if is_fooocus == 'a1111' else 'automatic1111'
                 parameters = embed['parameters']
                 prompt = parameters.partition('Steps: ')[0]
                 negative_prompt = prompt.partition('Negative prompt: ')[2]
@@ -1181,12 +1405,13 @@ def read_image_info(original_image, image_path):
                 else:
                     embed_par['prompt'] = prompt.strip()
 
-                parameters = parameters.split(',')
+                parameters = parse_key_value(parameters)
 
                 for par in parameters:
-                    par_list = par.split(':')
-                    title = par_list[0].strip().lower()
-                    content = par_list[1].strip().lower()
+                    title = par
+                    title = title.strip().lstrip(', ').lower()
+                    content = parameters[par]
+                    content = content.strip().lower()
                     embed_par[title] = content
 
             elif 'extras' in embed.keys():
@@ -1194,12 +1419,13 @@ def read_image_info(original_image, image_path):
                 modules = embed['extras'].split('\n')
                 embed_par = {}
                 for c, module in enumerate(modules):
-                    parameters = module.split(',')
+                    parameters = parse_key_value(module)
                     for par in parameters:
                         if par:
-                            par_list = par.split(':')
-                            title = f'{par_list[0].strip().lower()} {str(c + 1)}'
-                            content = par_list[1].strip().lower()
+                            title = par
+                            title = f'{title.strip().lstrip(", ").lower()} {str(c + 1)}'
+                            content = parameters[par]
+                            content = content.strip().lower()
                             embed_par[title] = content
             else:
                 try:
@@ -1208,24 +1434,12 @@ def read_image_info(original_image, image_path):
                 except (json.decoder.JSONDecodeError, IndexError):
                     embed_par['embedded info'] = embed_raw
         # Sorry for that but these metadata are a mess, never know what may come out of them.
-        except Exception:
+        except Exception as e:
             embed_par['embedded info'] = embed_raw
-            metadata_error.append(image_path)
+            metadata_error = (image_path, str(e))
+
     else:
         embed_par['embedded info'] = 'no information'
-
-    if metadata_error:
-        metadata_error_copy = '\n'.join(metadata_error)
-        tense = ['']
-        if len(metadata_error) > 1:
-            tense = ['s']
-
-        copy_to_clipboard(None, metadata_error_copy)
-
-        message = (f'Failed to parse {len(metadata_error)} image{tense[0]} metadata.\n\n'
-                   f'{metadata_error_copy}\n\n'
-                   f'Path{tense[0]} copied to the clipboard.')
-        tk.messagebox.showinfo(title='Metadata error.', message=message, parent=root)
 
     # Additional information
     real_size = original_image.size[0], original_image.size[1]
@@ -1239,15 +1453,28 @@ def read_image_info(original_image, image_path):
 
     embed_par[' '] = '\n'
     if source:
-        embed_par['source'] = source
+        embed_par['source'] = source.lower()
     embed_par['real_size'] = f'{real_size[0]} x {real_size[1]}'
     embed_par['format'] = img_format
     embed_par['created'] = str(file_time)
-    embed_par['path'] = image_path
+    embed_par['path'] = os.path.normpath(image_path)
+
+    dif_pars = list(set(embed_par.keys()) - set(TEXT_PARS))
+    for par in dif_pars:
+        if par not in new_pars and par.strip() != '':
+            new_pars.append(par)
+
+    temp_text_pars = TEXT_PARS
+    pos = len(temp_text_pars) - 6
+    temp_text_pars[pos:pos] = new_pars
+    temp_par = OrderedDict()
+    for item in temp_text_pars:
+        if item in embed_par:
+            temp_par[item] = embed_par[item]
+    embed_par = temp_par
 
     embed_list = []
     for key in embed_par:
-        # if key in embed_par:
         if key != ' ':
             embed_list.append(f'{key}: {embed_par[key]}\n')
         else:
@@ -1255,12 +1482,7 @@ def read_image_info(original_image, image_path):
 
     embed_txt = ''.join(embed_list)
 
-    dif_pars = list(set(embed_par.keys()) - set(TEXT_PARS))
-    for par in dif_pars:
-        if par not in new_pars and par.strip() != '':
-            new_pars.append(par)
-
-    return embed_txt, embed_par
+    return embed_txt, embed_par, metadata_error
 
 
 def progress_bar(amount, message, start=0):
@@ -1298,26 +1520,35 @@ def progress_bar(amount, message, start=0):
     return loading, progress, restart
 
 
-def save_image(event, idx):
+def save_image(event, idx, single=False):
 
     if idx == 0:
         return
 
-    orig_file = image_list[idx]['file']
-    orig_name = os.path.basename(orig_file)
-    dest_file = filedialog.asksaveasfile(initialfile=orig_name)
+    if single:
+        dest_path = filedialog.askdirectory()
+        if not dest_path:
+            return
 
-    if not dest_file:
-        return
+    for i in idx:
+        orig_file = image_list[i]['file']
+        orig_name = os.path.basename(orig_file)
 
-    dest_file = dest_file.name
-    shutil.copy2(orig_file, dest_file)
+        if single:
+            dest_file = os.path.join(dest_path, orig_name)
+        else:
+            dest_file = filedialog.asksaveasfile(initialfile=orig_name)
+            if not dest_file:
+                continue
+            dest_file = dest_file.name
+
+        shutil.copy2(orig_file, dest_file)
 
 
-def info_overlay(parameter_string):
+def overlay_info(parameter_string):
     '''Overlay information on grid image'''
-    if len(threading.enumerate()) > ROW_NBR:
-        return
+    # if len(threading.enumerate()) > ROW_NBR:
+    #     return
 
     global is_overlay
 
@@ -1336,8 +1567,8 @@ def info_overlay(parameter_string):
 
 def expose_images(search_string, parameter_string, invert=False, exact=False):
     '''Disable non matching images'''
-    if len(threading.enumerate()) > ROW_NBR:
-        return
+    # if len(threading.enumerate()) > ROW_NBR:
+    #     return
 
     search_string = enter_search(search_string)
     parameter_string = parameter_string.strip()
@@ -1380,10 +1611,13 @@ def enter_search(search_string):
 
 def search_images(search_string, parameter_string, invert=False, exact=False):
     '''Sow images matching a search string'''
-    if len(threading.enumerate()) > ROW_NBR:
-        return
+    # if len(threading.enumerate()) > ROW_NBR:
+    #     return
 
     global image_list
+
+    if not image_list:
+        return
 
     if parameter_string == 'path':
         search_string = os.path.normpath(search_string)
@@ -1400,7 +1634,6 @@ def search_images(search_string, parameter_string, invert=False, exact=False):
     progress['value'] = 100
     progress.update()
 
-    # start = time.time()
     for image_data in image_list:
 
         embed_text = image_data['txt_info']
@@ -1439,10 +1672,10 @@ def search_images(search_string, parameter_string, invert=False, exact=False):
     restart.destroy()
 
 
-def sort_images(parameter_string, reverse=None, force=False):
+def sort_images(parameter_string, reverse=None):
     '''Sort the images'''
-    if not force and len(threading.enumerate()) > ROW_NBR:
-        return
+    # if len(threading.enumerate()) > ROW_NBR:
+    #     return
 
     global image_list
     global sort_reverse
@@ -1484,6 +1717,53 @@ def sort_images(parameter_string, reverse=None, force=False):
     restart.destroy()
 
 
+def modify_grid():
+    global prev_button
+    global multi_index
+    global current_index
+
+    if not image_list:
+        return
+
+    images = 0
+    bx = 0
+    by = 0
+    for idx, image_data in enumerate(image_list):
+
+        button = image_data['button']
+
+        if not image_data['search']:
+            button.grid_forget()
+            continue
+
+        button.grid(row=bx, column=by)
+        button = modify_button(button, idx)
+
+        by += 1
+        if by % COL_NBR == 0:
+            by = 0
+            bx += 1
+
+        images += 1
+
+        button_unselect(button)
+
+    lbl_files.config(text=f'{images} images')
+
+    button = None
+    prev_button = None
+    current_index = 0
+    multi_index = []
+
+    # prev_button = button
+
+    canvas.yview_moveto('0')
+    refresh_images(vsb.get()[0], vsb.get()[1])
+
+    canvas_height = max((images // COL_NBR) * (GRID_IMG_SZ + BORDER * 2) + GRID_IMG_SZ, canvas.winfo_height())
+    canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas_height))
+
+
 def search_paths():
     path = lbl_path.get()
 
@@ -1505,19 +1785,23 @@ def generate_image_list(files):
     # Get images data
     image_list_temp = []
     image_error = []
+    metadata_errors = []
+
     for idx, file in enumerate(files):
         try:
             original_image = Image.open(file)
         except UnidentifiedImageError:
             image_error.append(file)
             continue
-        embed_text, embed_dict = read_image_info(original_image, file)
+        embed_text, embed_dict, metadata_error = read_image_info(original_image, file)
+        if metadata_error:
+            metadata_errors.append(metadata_error)
 
         item_dict = {'button': None,
                      'has_image': False,
                      'txt_info': embed_text,
                      'dic_info': embed_dict,
-                     'file': file,
+                     'file': os.path.normpath(file),
                      'search': True,
                      'sort': ''}
 
@@ -1531,18 +1815,39 @@ def generate_image_list(files):
             break
         progress.update()
 
-        lbl_files.config(text=f'{idx} images')
+    lbl_files.config(text=f'{idx} images')
 
     image_list_master = image_list_temp
 
     lbl_files.config(text=f'{idx} images')
     restart.destroy()
 
+    if metadata_errors:
+        metadata_errors_copy = ''
+        metadata_errors_clipboard = ''
+        for n, error in enumerate(metadata_errors):
+            error_str = ' - '.join(error)
+            error_str_clipboard = '", Error: "'.join(error)
+            if n < 10:
+                metadata_errors_copy += f'{error_str}\n'
+            elif n == 10:
+                metadata_errors_copy += 'and more...\n'
+
+            metadata_errors_clipboard += f'Path: "{error_str_clipboard}"\n'
+
+        tense = [''] if len(metadata_errors) <= 1 else ['s']
+
+        copy_to_clipboard(None, metadata_errors_clipboard)
+
+        message = (f'Failed to parse metadata from {len(metadata_errors)} image{tense[0]}.\n\n'
+                   f'{metadata_errors_copy}\n'
+                   f'Full information copied to the clipboard.\n\n')
+        tk.messagebox.showinfo(title='Metadata error.', message=message, parent=root)
+
     if image_error:
         image_error_copy = '\n'.join(image_error)
-        tense = ['']
-        if len(image_error) > 1:
-            tense = ['s']
+
+        tense = [''] if len(image_error) <= 1 else ['s']
 
         copy_to_clipboard(None, image_error_copy)
 
@@ -1554,18 +1859,12 @@ def generate_image_list(files):
     if new_pars:
         pars_copy = '\n'.join(new_pars)
 
-        tense = ['', 'it', 'its', 'it', 'was']
-        if len(new_pars) > 1:
-            tense = ['s', 'them', 'their', 'they', 'were']
+        tense = ['', 'it', 'its', 'it', 'was'] if len(new_pars) <= 1 else ['s', 'them', 'their', 'they', 'were']
 
         message = (f'Found {len(new_pars)} new parameter{tense[0]}.\n\n'
                    f'{pars_copy}\n\n'
                    f'{tense[3].capitalize()} {tense[4]} added to the parameters.txt.\n'
                    f'You can change {tense[2]} order on the file.\n')
-        #    f'({tense[3]} will be added before the space separator)\n\n')
-        #    f'If yes, open parameters.txt and adjust {tense[2]} order.\n\n'
-        #    f'If not, {tense[3]} {tense[4]} copied to the clipboard '
-        #    f'and can be added manually.')
 
         tk.messagebox.showinfo(title='New parameter found.', message=message, parent=root)
 
@@ -1583,10 +1882,6 @@ def generate_image_list(files):
         COMBO_VALUES = TEXT_PARS
         COMBO_VALUES.insert(0, ALL_PARAMETERS)
 
-        # with open(PARAMETERS_FILE, 'r') as file:
-        #     TEXT_PARS = file.read().splitlines()
-        # if res == 'yes':
-
     return image_list_temp
 
 
@@ -1599,14 +1894,14 @@ def update_grid():
     new_files = get_image_paths()
 
     if collections.Counter(old_files) == collections.Counter(new_files):
-        return
+        return True
 
     deleted_files = list(set(old_files) - set(new_files))
     new_files = list(set(new_files) - set(old_files))
 
     # Make a new list without the images on the deleted list
     # Also flag the ones not deleted as not having images so they can refresh
-    # and reset the search and sort parameters
+    # Reset the search and sort parameters
     image_list_temp = []
     for image_data in image_list:
         if image_data['file'] not in deleted_files:
@@ -1634,47 +1929,10 @@ def update_grid():
     del image_list_temp
 
     create_grid()
-    sort_images('created', reverse=True)
+    sort_images('', reverse=True)
     clear_info()
 
     lbl_files.config(text=f'{len(image_list)} images')
-
-
-def modify_grid():
-    global prev_button
-
-    if not image_list:
-        return
-
-    images = 0
-    bx = by = 0
-    for idx, image_data in enumerate(image_list):
-
-        button = image_data['button']
-
-        if not image_data['search']:
-            button.grid_forget()
-            continue
-
-        button.grid(row=bx, column=by)
-        button = modify_button(button, idx)
-
-        by += 1
-        if by % COL_NBR == 0:
-            by = 0
-            bx += 1
-
-        images += 1
-
-    lbl_files.config(text=f'{images} images')
-
-    prev_button = button
-
-    canvas.yview_moveto('0')
-    refresh_images(vsb.get()[0], vsb.get()[1])
-
-    canvas_height = max((images // COL_NBR) * (GRID_IMG_SZ + BORDER * 2) + GRID_IMG_SZ, canvas.winfo_height())
-    canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas_height))
 
 
 def create_grid():
@@ -1697,50 +1955,60 @@ def create_button(image, index):
                        relief='flat', name=str(index), image=image, highlightthickness=BORDER,
                        activebackground=BG_COLOR, bg=ACC_COLOR2, fg=ACC_COLOR1, bd=0,
                        compound="center", wraplength=GRID_IMG_SZ,
-                       justify='left', padx=0, pady=0)
+                       justify='center', padx=0, pady=0)
 
     return button
 
 
 def modify_button(button, index):
 
-    button['command'] = lambda index=index: click_grid_image(index)
+    # button['command'] = lambda index=index: click_grid_image(index)
+    button.bind('<Button-1>', lambda event, index=index: click_grid_image(index))
+    button.bind('<Shift-Button-1>', lambda event, index=index: click_grid_image(index, shift=True))
+    button.bind('<Control-Button-1>', lambda event, index=index: click_grid_image(index, control=True))
 
     button.bind('<Left>', lambda event: grid_keys(event, -1))
     button.bind('<Right>', lambda event: grid_keys(event, 1))
     button.bind('<Up>', lambda event: grid_keys(event, -COL_NBR))
     button.bind('<Down>', lambda event: grid_keys(event, COL_NBR))
 
-    root.bind('<Shift-Up>', lambda event: grid_keys(event, -COL_NBR * ROW_NBR + COL_NBR))
-    root.bind('<Shift-Down>', lambda event: grid_keys(event, COL_NBR * ROW_NBR - COL_NBR))
+    button.bind('<Shift-Left>', lambda event: grid_keys(event, -1, select=True))
+    button.bind('<Shift-Right>', lambda event: grid_keys(event, 1, select=True))
+    button.bind('<Shift-Up>', lambda event: grid_keys(event, -COL_NBR, select=True))
+    button.bind('<Shift-Down>', lambda event: grid_keys(event, COL_NBR, select=True))
+
+    root.bind('<Alt-Up>', lambda event: grid_keys(event, -COL_NBR * ROW_NBR + COL_NBR))
+    root.bind('<Alt-Down>', lambda event: grid_keys(event, COL_NBR * ROW_NBR - COL_NBR))
 
     root.bind('<Control-Up>', lambda event: grid_keys(event, 0, True))
     root.bind('<Control-Down>', lambda event: grid_keys(event, 1, True))
 
-    button.bind('<Double-Button-1>', lambda event, index=index: show_full_image(index))
-    button.bind('<Return>', lambda event, index=index: show_full_image(index))
-    button.bind('<space>', lambda event, index=index: show_full_image(index))
+    button.bind('<Double-Button-1>', lambda event, index=index: show_full_image([index]))
+    button.bind('<Return>', lambda event: show_full_image(multi_index))
+    button.bind('<space>', lambda event: show_full_image(multi_index))
 
-    button.bind('<Shift-Double-Button-1>', lambda event, index=index: show_image(index))
-    button.bind('<Shift-Return>', lambda event, index=index: show_image(index))
-    button.bind('<Shift-space>', lambda event, index=index: show_image(index))
+    button.bind('<Shift-Double-Button-1>', lambda event, index=index: show_image([index]))
+    button.bind('<Shift-Return>', lambda event: show_image(multi_index))
+    button.bind('<Shift-space>', lambda event: show_image(multi_index))
 
     button.bind("<Button-3>", lambda event, index=index: menu_popup(event, index))
     button.bind("<Button-2>", lambda event, index=index: menu_popup(event, index))
 
-    button.bind('<Control-s>', lambda event: save_image(event, current_index))
-    button.bind('<Control-S>', lambda event: save_image(event, current_index))
+    button.bind('<Control-s>', lambda event: save_image(event, multi_index))
+    button.bind('<Control-S>', lambda event: save_image(event, multi_index))
+    button.bind('<Shift-Control-s>', lambda event: save_image(event, multi_index, single=True))
+    button.bind('<Shift-Control-S>', lambda event: save_image(event, multi_index, single=True))
 
-    button.bind('<Control-f>', lambda event: explore_folder(current_index))
-    button.bind('<Control-F>', lambda event: explore_folder(current_index))
+    button.bind('<Control-f>', lambda event: explore_folder(multi_index, select=True))
+    button.bind('<Control-F>', lambda event: explore_folder(multi_index, select=True))
 
     button.bind('<Control-c>', lambda event=2: copy_to_clipboard(event, current_index))
     button.bind('<Control-C>', lambda event=2: copy_to_clipboard(event, current_index))
 
-    button.bind('<Control-i>', lambda event: save_info(current_index))
-    button.bind('<Control-I>', lambda event: save_info(current_index))
-    button.bind('<Shift-Control-i>', lambda event: save_info(current_index, True))
-    button.bind('<Shift-Control-I>', lambda event: save_info(current_index, True))
+    button.bind('<Control-i>', lambda event: save_info(multi_index))
+    button.bind('<Control-I>', lambda event: save_info(multi_index))
+    button.bind('<Shift-Control-i>', lambda event: save_info(multi_index, ask=True))
+    button.bind('<Shift-Control-I>', lambda event: save_info(multi_index, ask=True))
 
     return button
 
@@ -1749,12 +2017,23 @@ def menu_popup(event, idx):
     '''Open popup menu and make index global'''
     global popup_index
 
+    # button = image_list[idx]['button']
+    if idx in multi_index:
+        click_grid_image(idx, right=True)
+    else:
+        click_grid_image(idx)
+
+    # button.focus_set()
+
     pop_menu.delete(0)
-    filename = os.path.basename(image_list[idx]['file'])[:20] + '...'
-    pop_menu.insert_cascade(0, label=filename, foreground=FONT_COLOR, background=BG_COLOR,
+    if len(multi_index) > 1:
+        label = f'{len(multi_index)} selected'
+    else:
+        label = os.path.basename(image_list[idx]['file'])[:20] + '...'
+
+    pop_menu.insert_cascade(0, label=label, foreground=FONT_COLOR, background=BG_COLOR,
                             activebackground=BG_COLOR, activeforeground=ACC_COLOR1, command=lambda: menu_items(7))
 
-    popup_index = idx
     try:
         pop_menu.tk_popup(event.x_root, event.y_root)
     finally:
@@ -1764,62 +2043,38 @@ def menu_popup(event, idx):
 def menu_items(item):
     '''Deal with menu choices'''
 
-    if item == 0:
-        show_full_image(popup_index)
-
-    elif item == 1:
-        show_image(popup_index)
-
-    elif item == 2:
-        explore_folder(popup_index)
-
-    elif item == 3:
-        embed_txt = image_list[popup_index]['txt_info']
-        copy_to_clipboard(None, embed_txt)
-
-    elif item == 4:
-        save_info(popup_index)
-
-    elif item == 5:
-        save_info(popup_index, True)
-
-    elif item == 7:
-        filename = image_list[popup_index]['file']
+    if item == 7:
+        filename = ''
+        for i in multi_index:
+            filename += f'{image_list[i]["file"]}\n'
         copy_to_clipboard(None, filename)
 
-    else:
-        save_image(None, popup_index)
+    elif item == 0:
+        show_full_image(multi_index)
 
+    elif item == 1:
+        show_image(multi_index)
 
-def first_run():
-    global sort_reverse
-    global is_overlay
+    elif item == 2:
+        explore_folder(multi_index, select=True)
 
-    is_overlay = ''
+    elif item == 6:
+        save_image(None, multi_index)
 
-    loading, progress, restart = progress_bar(amount=2, message='Initializing', start=1)
+    elif item == 8:
+        save_image(None, multi_index, single=True)
 
-    progress['value'] = 50
-    progress.update()
+    elif item == 4:
+        save_info(multi_index)
 
-    load_success = load_image_list()
+    elif item == 5:
+        save_info(multi_index, ask=True)
 
-    if load_success:
-        create_grid()
-        update_grid()
-        sort_images('', reverse=True, force=True)
-
-        loading['text'] = f'2 of 2'
-        progress['value'] = 100
-        progress.update()
-
-    # # Update buttons frames idle tasks to let tkinter calculate buttons sizes
-    # frame_buttons.update_idletasks()
-
-    # Set the canvas scrolling region
-    canvas.config(scrollregion=canvas.bbox('all'))
-
-    restart.destroy()
+    elif item == 3:
+        embed_txt = ''
+        for i in multi_index:
+            embed_txt += f'{image_list[i]["txt_info"]}\n'
+        copy_to_clipboard(None, embed_txt)
 
 
 def get_image_paths():
@@ -1833,7 +2088,11 @@ def get_image_paths():
     if not os.path.isfile(FOLDERS_FILE):
         return None
 
-    folders_combo = []
+    paths_user = []
+    paths_uniques = []
+    paths_upper_all = []
+    paths_upper_clean = []
+    paths_all = []
     try:
         with open(FOLDERS_FILE, 'r') as file:
             folders = json.load(file)
@@ -1841,12 +2100,19 @@ def get_image_paths():
         tk.messagebox.showinfo(title='Error loading folders.', message=e, parent=root)
         return None
     finally:
+
+        loading, progress, restart = progress_bar(amount=1, message='Scanning images', start=1)
+        loading['text'] = f''
+        progress['value'] = 100
+        progress.update()
+
         ext = ['.png', '.jpg']
         for folder in folders:
             path = folder[1]
-            folders_combo.append(path)
             recursive = True if folder[0] == '1' else False
-            if os.path.isdir(path):
+            active = True if folder[2] == '1' else False
+            if os.path.isdir(path) and active:
+                paths_user.append(os.path.normpath(path))
                 for e in ext:
                     if recursive:
                         file = glob.glob(os.path.normpath(path + '/**/*' + e), recursive=True)
@@ -1854,8 +2120,32 @@ def get_image_paths():
                         file = glob.glob(os.path.normpath(path + '/*' + e), recursive=False)
                     files.extend(file)
 
-    folders_combo.insert(0, ALL_FOLDERS)
-    lbl_path.config(value=folders_combo)
+        restart.destroy()
+
+    paths_all.extend(paths_user)
+
+    for p in files:
+        image_path = os.path.dirname(p)
+        if image_path not in paths_uniques:
+            paths_uniques.append(image_path)
+            paths_upper_all.append(os.path.dirname(image_path))
+
+    paths_all.extend(paths_uniques)
+
+    while paths_upper_all:
+        path_upper_clean = paths_upper_all.pop()
+        if path_upper_clean in paths_upper_all:
+            paths_upper_clean.append(path_upper_clean)
+            paths_upper_all = [p for p in paths_upper_all if p != path_upper_clean]
+
+    paths_all.extend(paths_upper_clean)
+
+    if paths_all:
+        paths_all = list(set(paths_all))
+        paths_all.sort()
+
+    paths_all.insert(0, ALL_FOLDERS)
+    lbl_path.config(value=paths_all)
     lbl_path.current(0)
 
     return files
@@ -1876,7 +2166,9 @@ def load_image_list():
             return False
 
     else:
+
         files = get_image_paths()
+
         if files is None:
             return False
         image_list = generate_image_list(files)
@@ -1884,6 +2176,38 @@ def load_image_list():
             pickle.dump(image_list, f)
 
     return True
+
+
+def first_run():
+    global sort_reverse
+    global is_overlay
+
+    is_overlay = ''
+
+    loading, progress, restart = progress_bar(amount=2, message='Initializing', start=1)
+
+    progress['value'] = 50
+    progress.update()
+
+    load_success = load_image_list()
+
+    if load_success:
+        create_grid()
+        skipped = update_grid()
+        if skipped:
+            sort_images('', reverse=True)
+
+        loading['text'] = f'2 of 2'
+        progress['value'] = 100
+        progress.update()
+
+    # # Update buttons frames idle tasks to let tkinter calculate buttons sizes
+    # frame_buttons.update_idletasks()
+
+    # Set the canvas scrolling region
+    canvas.config(scrollregion=canvas.bbox('all'))
+
+    restart.destroy()
 
 
 def main():
@@ -1939,10 +2263,32 @@ def main():
     root.bind('<Shift-Control-o>', lambda event: sort_images(''))
     root.bind('<Shift-Control-O>', lambda event: sort_images(''))
 
-    root.bind('<Control-l>', lambda event=2: info_overlay(combo_params.get()))
-    root.bind('<Control-L>', lambda event=2: info_overlay(combo_params.get()))
-    root.bind('<Shift-Control-l>', lambda event=2: info_overlay(''))
-    root.bind('<Shift-Control-L>', lambda event=2: info_overlay(''))
+    root.bind('<Control-l>', lambda event=2: overlay_info(combo_params.get()))
+    root.bind('<Control-L>', lambda event=2: overlay_info(combo_params.get()))
+    root.bind('<Shift-Control-l>', lambda event=2: overlay_info(''))
+    root.bind('<Shift-Control-L>', lambda event=2: overlay_info(''))
+
+    style = ttk.Style()
+    style.theme_use('default')
+    style.configure('TCombobox', relief='flat', background=FONT_COLOR, foreground=BG_COLOR,
+                    selectbackground=FONT_COLOR, selectforeground=ACC_COLOR2,
+                    arrowcolor=BG_COLOR, darkcolor=ACC_COLOR1, borderwidth=0)
+    style.map('TCombobox', fieldbackground=[('disabled', ACC_COLOR1), ('!disabled', ACC_COLOR1)])
+    style.map('TCombobox', background=[('disabled', ACC_COLOR1), ('pressed', ACC_COLOR2), ('active', ACC_COLOR1)])
+    root.option_add('*TCombobox*Listbox*Background', FONT_COLOR)
+    root.option_add('*TCombobox*Listbox*Foreground', BG_COLOR)
+    root.option_add('*TCombobox*Listbox*selectBackground', ACC_COLOR1)
+    root.option_add('*TCombobox*Listbox*selectForeground', BG_COLOR)
+
+    style.configure('Treeview', borderwidth=0, background=ACC_COLOR1, foreground=BG_COLOR, fieldbackground=ACC_COLOR1)
+    style.map('Treeview', background=[('selected', FONT_COLOR)], foreground=[('selected', BG_COLOR)])
+    style.configure('Treeview.Heading', background=FONT_COLOR, relief='solid', borderwidth=1, height=BUTT_HEIGHT)
+    style.map('Treeview.Heading', background=[('pressed', ACC_COLOR2), ('active', ACC_COLOR1)])
+
+    style.configure("Vertical.TScrollbar", troughcolor=BG_COLOR, background=FONT_COLOR, borderwidth=0,
+                    arrowcolor=BG_COLOR, selectbackground=ACC_COLOR1, selectforeground=ACC_COLOR1, relief='flat')
+    style.map('Vertical.TScrollbar', background=[('disabled', BG_COLOR), ('active', ACC_COLOR1)])
+    style.map('Vertical.TScrollbar', arrowcolor=[('disabled', BG_COLOR), ('active', BG_COLOR)])
 
     # Frame to hold the entire interface
     frame_all = tk.Frame(root, bg=BG_COLOR)
@@ -1961,7 +2307,7 @@ def main():
     frame_top_l = tk.Frame(frame_top, bg=BG_COLOR)
     frame_top_l.grid(row=0, column=0, sticky='ewns')
 
-    frame_top_l.grid_rowconfigure(0, weight=1)
+    # frame_top_l.grid_rowconfigure(0, weight=1)
     frame_top_l.grid_columnconfigure(0, weight=0)
     frame_top_l.grid_columnconfigure(1, weight=1)
 
@@ -1970,11 +2316,11 @@ def main():
     frame_top_r.grid(row=0, column=1, sticky='ewns')
     frame_top_r.grid_propagate(False)
 
-    frame_top_r.grid_rowconfigure(0, weight=1)
+    # frame_top_r.grid_rowconfigure(0, weight=1)
     frame_top_r.grid_columnconfigure(0, weight=1)
-    frame_top_r.grid_columnconfigure(1, weight=2)
-    frame_top_r.grid_columnconfigure(2, weight=2)
-    frame_top_r.grid_columnconfigure(3, weight=2)
+    frame_top_r.grid_columnconfigure(1, weight=1)
+    # frame_top_r.grid_columnconfigure(2, weight=2)
+    # frame_top_r.grid_columnconfigure(3, weight=2)
 
     # Number of files label, top left frame
     lbl_files = tk.Label(frame_top_l, bg=BG_COLOR, fg=ACC_COLOR1, text=f'images')
@@ -1988,30 +2334,30 @@ def main():
     lbl_path.pack(expand=True, fill='both', pady=1, padx=1)
 
     # Refresh button, top right frame
-    brd_bt_refr = tk.Frame(frame_top_r, bg=BG_COLOR)
-    brd_bt_refr.grid(row=0, column=0, sticky='snwe')
+    brd_bt_refr = tk.Frame(frame_top_l, bg=BG_COLOR)
+    brd_bt_refr.grid(row=0, column=2, sticky='snwe')
     butt_refr = tk.Button(brd_bt_refr, text='refresh', bd=0, command=update_grid,
                           bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
     butt_refr.pack(expand=True, fill='both', pady=1, padx=1)
 
-    # Path button, top right frame
-    brd_bt_path = tk.Frame(frame_top_r, bg=BG_COLOR)
-    brd_bt_path.grid(row=0, column=1, sticky='snwe')
-    butt_path = tk.Button(brd_bt_path, text='paths', bd=0, command=folders_requester,
-                          bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
-    butt_path.pack(expand=True, fill='both', pady=1, padx=1)
-
-    # Explorer button, top right frame
-    brd_bt_open = tk.Frame(frame_top_r, bg=BG_COLOR)
-    brd_bt_open.grid(row=0, column=2, sticky='snwe')
+    # Open path button, top right frame
+    brd_bt_open = tk.Frame(frame_top_l, bg=BG_COLOR)
+    brd_bt_open.grid(row=0, column=3, sticky='snwe')
     butt_open = tk.Button(brd_bt_open, text='open path', bd=0, command=lambda: explore_folder({'values': ['', lbl_path.get()]}),
                           bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
     butt_open.pack(expand=True, fill='both', pady=1, padx=1)
 
+    # Path button, top right frame
+    brd_bt_path = tk.Frame(frame_top_r, bg=BG_COLOR)
+    brd_bt_path.grid(row=0, column=0, sticky='snwe')
+    butt_path = tk.Button(brd_bt_path, text='paths', bd=0, command=folders_requester,
+                          bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
+    butt_path.pack(expand=True, fill='both', pady=1, padx=1)
+
     # Config button, top right frame
     brd_bt_conf = tk.Frame(frame_top_r, bg=BG_COLOR)
-    brd_bt_conf.grid(row=0, column=3, sticky='snwe')
-    butt_conf = tk.Button(brd_bt_conf, text='config', bd=0, command=open_config,
+    brd_bt_conf.grid(row=0, column=1, sticky='snwe')
+    butt_conf = tk.Button(brd_bt_conf, text='config', bd=0, command=config_requester,
                           bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
     butt_conf.pack(expand=True, fill='both', pady=1, padx=1)
 
@@ -2028,11 +2374,11 @@ def main():
     # Button to show the selected image
     img_info = tk.Button(info_frame, bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1,
                          font=(FONT[0], FONT[1] * 3, 'bold'), borderwidth=0, text=PROGRAM_NAME)
-    img_info.bind('<Button-1>', lambda event: show_full_image(current_index))
-    img_info.bind('<Button-2>', lambda event: show_image(current_index))
-    img_info.bind('<Button-3>', lambda event: show_image(current_index))
-    img_info.bind('<Shift-Button-1>', lambda event: show_image(current_index))
-    img_info.place(x=0, y=0, height=INFO_IMG_SZ, width=INFO_IMG_SZ)
+    img_info.bind('<Button-1>', lambda event: show_full_image([current_index]))
+    img_info.bind('<Button-2>', lambda event: show_image([current_index]))
+    img_info.bind('<Button-3>', lambda event: show_image([current_index]))
+    img_info.bind('<Shift-Button-1>', lambda event: show_image([current_index]))
+    img_info.place(x=1, y=1, height=INFO_IMG_SZ - 2, width=INFO_IMG_SZ - 2)
 
     # Text box to show the selected image info
     text_info_height = GRID_IMG_SZ * ROW_NBR - INFO_IMG_SZ + (BORDER * 2 * ROW_NBR)
@@ -2043,14 +2389,19 @@ def main():
     text_info.bind('<ButtonRelease-1>', lambda event: copy_to_clipboard(event))
     text_info.bind('<ButtonRelease-2>', lambda event: copy_to_clipboard(event))
     text_info.bind('<ButtonRelease-3>', lambda event: copy_to_clipboard(event))
-
     text_info.insert('insert', TEXT_INFO_DEFAULT)
-    text_info.place(x=0, y=INFO_IMG_SZ, height=text_info_height, width=INFO_IMG_SZ)
+    text_info.place(x=0, y=INFO_IMG_SZ, height=text_info_height, width=INFO_IMG_SZ - 15)
     text_info['state'] = 'disable'
+
+    # Text box info scrollbar
+    sb_txt_info = ttk.Scrollbar(info_frame, orient='vertical')
+    sb_txt_info.place(x=INFO_IMG_SZ - 15, y=INFO_IMG_SZ, height=text_info_height)
+    text_info.configure(yscrollcommand=sb_txt_info.set)
+    sb_txt_info.config(command=text_info.yview)
 
     # Frame for the image grid
     frame_canvas = tk.Frame(frame_main, bg=BG_COLOR)
-    frame_canvas.grid(row=0, column=0, sticky='nw')
+    frame_canvas.grid(row=0, column=0, sticky='nw', pady=(1, 0))
     frame_canvas.grid_rowconfigure(0, weight=1)
     frame_canvas.grid_columnconfigure(0, weight=1)
     frame_canvas.grid_propagate(False)
@@ -2068,8 +2419,8 @@ def main():
     canvas.create_window((0, 0), window=frame_buttons, anchor='nw')
 
     # Link a scrollbar to the canvas
-    vsb = tk.Scrollbar(frame_canvas, orient='vertical', command=canvas.yview)
-    vsb.grid(row=0, column=1, sticky='ns')
+    vsb = ttk.Scrollbar(frame_canvas, orient='vertical', command=canvas.yview)
+    vsb.grid(row=0, column=1, sticky='ns', padx=(0, 1), pady=(0, 0))
     canvas.configure(yscrollcommand=refresh_images)
 
     # Resize the canvas and frame
@@ -2174,14 +2525,14 @@ def main():
     brd_bt_overlay.grid(row=0, column=5, sticky='news')
     butt_overlay = tk.Button(brd_bt_overlay, text='overlay', bd=0,
                              bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
-    butt_overlay.bind('<Return>', lambda event: info_overlay(combo_params.get()))
-    butt_overlay.bind('<space>', lambda event: info_overlay(combo_params.get()))
-    butt_overlay.bind('<Button-1>', lambda event: info_overlay(combo_params.get()))
-    butt_overlay.bind('<Button-2>', lambda event: info_overlay(''))
-    butt_overlay.bind('<Button-3>', lambda event: info_overlay(''))
-    butt_overlay.bind('<Shift-Return>', lambda event: info_overlay(''))
-    butt_overlay.bind('<Shift-space>', lambda event: info_overlay(''))
-    butt_overlay.bind('<Shift-Button-1>', lambda event: info_overlay(''))
+    butt_overlay.bind('<Return>', lambda event: overlay_info(combo_params.get()))
+    butt_overlay.bind('<space>', lambda event: overlay_info(combo_params.get()))
+    butt_overlay.bind('<Button-1>', lambda event: overlay_info(combo_params.get()))
+    butt_overlay.bind('<Button-2>', lambda event: overlay_info(''))
+    butt_overlay.bind('<Button-3>', lambda event: overlay_info(''))
+    butt_overlay.bind('<Shift-Return>', lambda event: overlay_info(''))
+    butt_overlay.bind('<Shift-space>', lambda event: overlay_info(''))
+    butt_overlay.bind('<Shift-Button-1>', lambda event: overlay_info(''))
     butt_overlay.pack(expand=True, fill='both', pady=1, padx=1)
 
     search_frame.grid_rowconfigure(0, weight=1)
@@ -2201,7 +2552,7 @@ def main():
     brd_bt_folder = tk.Frame(info_panel_frame, bg=BG_COLOR)
     brd_bt_folder.grid(row=0, column=0, sticky='news')
     butt_folder = tk.Button(brd_bt_folder, text='show in folder', bd=0,
-                            command=lambda: explore_folder(current_index),
+                            command=lambda: explore_folder([current_index], select=True),
                             bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
     butt_folder.pack(expand=True, fill='both', pady=1, padx=1)
 
@@ -2211,14 +2562,14 @@ def main():
     butt_save_info = tk.Button(brd_bt_save_info, text='save info', bd=0,
                                bg=FONT_COLOR, fg=BG_COLOR, activebackground=ACC_COLOR1)
     butt_save_info.pack(expand=True, fill='both', pady=1, padx=1)
-    butt_save_info.bind('<Return>', lambda event: save_info(current_index))
-    butt_save_info.bind('<space>', lambda event: save_info(current_index))
-    butt_save_info.bind('<Button-1>', lambda event: save_info(current_index))
-    butt_save_info.bind('<Button-2>', lambda event: save_info(current_index, True))
-    butt_save_info.bind('<Button-3>', lambda event: save_info(current_index, True))
-    butt_save_info.bind('<Shift-Return>', lambda event: save_info(current_index, True))
-    butt_save_info.bind('<Shift-space>', lambda event: save_info(current_index, True))
-    butt_save_info.bind('<Shift-Button-1>', lambda event: save_info(current_index, True))
+    butt_save_info.bind('<Return>', lambda event: save_info(multi_index))
+    butt_save_info.bind('<space>', lambda event: save_info(multi_index))
+    butt_save_info.bind('<Button-1>', lambda event: save_info(multi_index))
+    butt_save_info.bind('<Button-2>', lambda event: save_info(multi_index, ask=True))
+    butt_save_info.bind('<Button-3>', lambda event: save_info(multi_index, ask=True))
+    butt_save_info.bind('<Shift-Return>', lambda event: save_info(multi_index, ask=True))
+    butt_save_info.bind('<Shift-space>', lambda event: save_info(multi_index, ask=True))
+    butt_save_info.bind('<Shift-Button-1>', lambda event: save_info(multi_index, ask=True))
 
     info_panel_frame.grid_rowconfigure(0, weight=1)
     info_panel_frame.grid_columnconfigure(0, weight=1)
@@ -2226,15 +2577,21 @@ def main():
 
     # Popup menu
     pop_menu = tk.Menu(root, tearoff=0, relief='flat', bg=FONT_COLOR,
-                       activebackground=ACC_COLOR1, activeforeground=BG_COLOR, disabledforeground=FONT_COLOR,
-                       borderwidth=0, activeborderwidth=0)
+                       activebackground=ACC_COLOR1, activeforeground=BG_COLOR, disabledforeground=ACC_COLOR2,
+                       disabled=ACC_COLOR2, borderwidth=0, activeborderwidth=0)
     pop_menu.add_separator()
-    pop_menu.add_command(label='open image internal', foreground=BG_COLOR, command=lambda: menu_items(0))
-    pop_menu.add_command(label='open image in system', foreground=BG_COLOR, command=lambda: menu_items(1))
-    pop_menu.add_command(label='show image in folder', foreground=BG_COLOR, command=lambda: menu_items(2))
-    pop_menu.add_command(label='copy image to folder', foreground=BG_COLOR, command=lambda: menu_items(6))
+    pop_menu.add_separator()
+    pop_menu.add_command(label='open image(s) internal', foreground=BG_COLOR, command=lambda: menu_items(0))
+    pop_menu.add_command(label='open image(s) in system', foreground=BG_COLOR, command=lambda: menu_items(1))
+    pop_menu.add_separator()
+    pop_menu.add_command(label='show image(s) in folder', foreground=BG_COLOR, command=lambda: menu_items(2))
+    pop_menu.add_separator()
+    pop_menu.add_command(label='copy image(s) to folders', foreground=BG_COLOR, command=lambda: menu_items(6))
+    pop_menu.add_command(label='copy image batch to folder', foreground=BG_COLOR, command=lambda: menu_items(8))
+    pop_menu.add_separator()
     pop_menu.add_command(label='save info', foreground=BG_COLOR, command=lambda: menu_items(4))
     pop_menu.add_command(label='save info as', foreground=BG_COLOR, command=lambda: menu_items(5))
+    pop_menu.add_separator()
     pop_menu.add_command(label='copy info to clipboard', foreground=BG_COLOR, command=lambda: menu_items(3))
 
     # Adjustments for MacOS
@@ -2250,26 +2607,11 @@ def main():
     text_info.config(highlightbackground=BG_COLOR)
     entry_search.config(highlightbackground=BG_COLOR)
 
-    style = ttk.Style()
-    style.theme_use('default')
-    style.configure('TCombobox', relief='flat', background=FONT_COLOR, foreground=BG_COLOR,
-                    selectbackground=FONT_COLOR, selectforeground=ACC_COLOR2,
-                    arrowcolor=BG_COLOR, darkcolor=ACC_COLOR1)
-    style.map('TCombobox', fieldbackground=[('disabled', ACC_COLOR1), ('!disabled', ACC_COLOR1)])
-    root.option_add('*TCombobox*Listbox*Background', FONT_COLOR)
-    root.option_add('*TCombobox*Listbox*Foreground', BG_COLOR)
-    root.option_add('*TCombobox*Listbox*selectBackground', ACC_COLOR1)
-    root.option_add('*TCombobox*Listbox*selectForeground', BG_COLOR)
-
-    style.configure('Treeview', borderwidth=0, background=ACC_COLOR1, foreground=BG_COLOR, fieldbackground=ACC_COLOR1)
-    style.map('Treeview', background=[('selected', FONT_COLOR)], foreground=[('selected', BG_COLOR)])
-    style.configure('Treeview.Heading', background=FONT_COLOR)
-    style.map('Treeview.Heading', background=[('pressed', ACC_COLOR1)])
-
     # Launch the GUI
-    # frame_buttons.config(bg=ACC_COLOR1)
-    # tk.messagebox.showinfo(title='Speed test', message='Ok to go.')
-    # first_run()
+    ico = Image.open(os.path.join(LOCAL_PATH, 'Images', 'Logo.png'))
+    ico = ImageTk.PhotoImage(ico)
+    root.wm_iconphoto(False, ico)
+
     root.after(50, lambda: first_run())
     root.mainloop()
 

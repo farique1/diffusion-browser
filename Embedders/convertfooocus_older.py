@@ -15,7 +15,7 @@ SETS = ('styles', 'resolution', 'adm guidance')
 parameters_dict = OrderedDict()
 folders_dict = {}
 
-IN_FOLDER = 'D:\\Fooocus_win64_2-1-791\\Fooocus\\output'
+IN_FOLDER = 'D:\\Fooocus_win64_2-1-791\\Fooocus\\outputs'
 OUT_FOLDER = 'D:\\Fooocus_win64_2-1-791\\Converted'
 
 # Gel all subfolders from output folder

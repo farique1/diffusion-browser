@@ -1,6 +1,9 @@
 embedded info
+raw prompt
+raw negative prompt
 prompt
 negative prompt
+negative_prompt
 seed
 sampler
 sampler_name
@@ -69,7 +72,24 @@ lora weight 1
 lora name 1
 lora weight 2
 lora name 2
-
+clipPoints
+metadata scheme
+lora_combined_1
+refiner_switch
+loras
+prompt_expansion
+adm_guidance
+full_negative_prompt
+full_prompt
+guidance_scale
+base_model_hash
+base_model
+refiner_model
+created_by
+user
+lora hashes
+metadata_scheme
+ 
 source
 real_size
 format
