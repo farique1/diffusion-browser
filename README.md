@@ -14,16 +14,22 @@ The images are loaded on the fly when the program is first opened and on a few o
 **More versatile**  
 You can set several folders where to look for images and set subfolder lookup individually.  
   
-**Coming**  
+**Planned**  
 Allow loading and saving multiple projects  
-Add tags to the images  
+Allow for multiple projects with different configurations  
+Add hearts to the images  
 Add stars to the images  
+Add tags to the images  
 Create image sets  
-Image viewer improvements with next/previous buttons and more  
+Mute folders to hide them without having to rebuild the database    
 Manage the parameters list inside the program  
-Show all data available on a given parameter  
-Find images by their content and not by their extensions  
-Undock and dock the image and embedded info viewers  
+Refresh the parameters without having to rebuilding the database  
+Allow the consoluidation of multiple parameters into a single label  
+Image viewer improvements with next/previous buttons and more  
+Show all data available for a given parameter  
+Find images and select format by their content not their extensions  
+Undock and dock the image and inforormation viewers  
+Make the metadata reading functions more independent to facilitate future implementations  
 More  
   
 > On [Embedders](Embedders/README.md) there are scripts to embed information from some generators that do not embed them.  
