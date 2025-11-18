@@ -133,7 +133,7 @@ TEXT_INFO_DEFAULT = ('Diffusion Browser v3.0\n'
 
 LOCAL_PATH = os.path.split(os.path.abspath(__file__))[0]
 PROJECT_PATH = 'Projects'
-current_project = 'default'
+current_project = 'Default'
 INI_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'difbrowser.ini')
 PARAMETERS_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'parameters.txt')
 DATA_FILE = os.path.join(LOCAL_PATH, PROJECT_PATH, current_project, 'data.pickle')
